@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Arduino / C++
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.bin
+*.elf
+*.hex
+build/
+cmake-build-*/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
