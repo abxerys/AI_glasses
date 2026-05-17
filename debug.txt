@@ -1,0 +1,22 @@
+語音轉文字:
+1.因為原本開源為ESP32而我們採用的為ESP32S3 sense所以可能有硬體上的監容性問題(開源的ESP32沒有麥克風所以直接外接I2S，且輸出的格式為PCM，所以較不吃CPU，這邊的為PDM會搶到mic的CPU和頻寬所以音訊品質會不穩定)
+2.電音原因可能為CPU和wifi給的頻寬要同時給cam+mic，所以嘗試把cam的fps拉低(原本0是沒有限制)後輸出的.wav檔有改善一些而使api可以成功辨識
+   e.g. int g_target_fps = 2;(0->2)(compile.ino)
+   !!後續如果因此出問題要修正這裡!!
+3.ESP32S3有CPU0和CPU1，CPU1和wifi有直接關係，所以暫時將CPU1放到mic上，且優先權拉高
+e.g.   
+  xTaskCreatePinnedToCore(taskCamCapture, "cam_cap", 10240, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(taskCamSend,    "cam_snd",  8192, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(taskMicCapture, "mic_cap",   4096, NULL, 4, NULL, 1);
+  xTaskCreatePinnedToCore(taskMicUpload,  "mic_upl",   4096, NULL, 3, NULL, 1);
+4.將音訊作放大處理 -> 改taskMicCaptur
+
+5.音源輸出:
+conda install -c conda-forge ffmpeg -y
+from gtts import gTTS
+
+為了先用錄好的影片測試，註解了loop中的
+//if (!wsCam.available()) wsCam.connect(SERVER_HOST,...
+//wsCam.poll();
+audio_stream.py
+audio_player.py

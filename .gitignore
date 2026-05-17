@@ -1,0 +1,13 @@
+.venv/
+venv/
+runs/
+*.exe
+*.avi
+*.ts
+*.pt
+*.task
+*.onnx
+*.engine
+static/models/
+videos/
+*.mp4
