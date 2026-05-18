@@ -116,7 +116,12 @@ async def amain() -> None:
     asyncio.create_task(_stt_loop(stt, audio_buf, sm), name="stt-loop")
 
     async def _handler(ws):
-        path = getattr(ws, "path", "/")
+        # websockets >= 13 moved `path` onto the request object.
+        # Fall back to the legacy attribute for older releases.
+        try:
+            path = ws.request.path
+        except AttributeError:
+            path = getattr(ws, "path", "/")
         await hub.handle(ws, path)
 
     log.info("ws server listening on ws://%s:%d", WS_HOST, WS_PORT)

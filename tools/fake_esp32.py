@@ -25,6 +25,24 @@ log = logging.getLogger("fake_esp32")
 
 SAMPLE_RATE = 16000
 MIC_CHUNK_MS = 250
+CONNECT_RETRY_DELAY = 2.0
+
+
+async def _connect_with_retry(uri: str, label: str):
+    """Keep retrying until the edge server accepts our connection.
+
+    The edge server takes ~30–60 s on first run while faster-whisper downloads
+    its model, so a single connect attempt will usually race past it. Retry
+    forever — Ctrl+C is how the user stops the demo anyway.
+    """
+    while True:
+        try:
+            ws = await websockets.connect(uri, max_size=8 * 1024 * 1024)
+            log.info("%s connected: %s", label, uri)
+            return ws
+        except (ConnectionRefusedError, OSError) as e:
+            log.info("%s waiting for server (%s) …", label, e.__class__.__name__)
+            await asyncio.sleep(CONNECT_RETRY_DELAY)
 
 
 async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int) -> None:
@@ -33,8 +51,8 @@ async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int) -> No
         raise RuntimeError(f"cannot open camera {camera}")
     period = 1.0 / fps
     try:
-        async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
-            log.info("video connected: %s", uri)
+        ws = await _connect_with_retry(uri, "video")
+        async with ws:
             while True:
                 ok, frame = cap.read()
                 if not ok:
@@ -64,8 +82,8 @@ async def stream_audio_in(uri: str) -> None:
     )
     stream.start()
     try:
-        async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
-            log.info("audio_in connected: %s", uri)
+        ws = await _connect_with_retry(uri, "audio_in")
+        async with ws:
             while True:
                 chunk = await queue.get()
                 await ws.send(chunk)
@@ -75,8 +93,8 @@ async def stream_audio_in(uri: str) -> None:
 
 
 async def receive_audio_out(uri: str) -> None:
-    async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
-        log.info("audio_out connected: %s", uri)
+    ws = await _connect_with_retry(uri, "audio_out")
+    async with ws:
         async for msg in ws:
             if not isinstance(msg, (bytes, bytearray)):
                 continue
