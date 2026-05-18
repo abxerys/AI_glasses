@@ -100,9 +100,20 @@ def _start_backend_thread(host: str, port: int) -> threading.Thread:
 
 def _wait_for_backend(host: str, port: int,
                       timeout: float = HEALTH_TIMEOUT_S,
-                      progress_cb=None) -> bool:
-    """輪詢 TCP，等待後端埠開放。"""
-    deadline = time.monotonic() + timeout
+                      progress_cb=None,
+                      ui_update_fn=None) -> bool:
+    """
+    輪詢 TCP，等待後端埠開放。
+
+    ui_update_fn 可傳入 tkinter 的 root.update()，
+    確保 splash 視窗在等待期間保持響應（不凍結）。
+    原本的 time.sleep(1.0) 會完全阻塞主執行緒導致視窗凍結，
+    改為 20 × 0.05s 的短迴圈，每次都呼叫 ui_update_fn()。
+    """
+    deadline  = time.monotonic() + timeout
+    start     = time.monotonic()
+    last_msg  = 0.0
+
     while time.monotonic() < deadline:
         try:
             with socket.create_connection((host, port), timeout=1.0):
@@ -111,10 +122,24 @@ def _wait_for_backend(host: str, port: int,
                 return True
         except OSError:
             pass
-        if progress_cb:
-            elapsed = int(time.monotonic() - (deadline - timeout))
-            progress_cb(f"等待後端啟動… ({elapsed}s)　AI 模型載入中，請稍候")
-        time.sleep(1.0)
+
+        now = time.monotonic()
+        if now - last_msg >= 1.0:
+            last_msg = now
+            if progress_cb:
+                elapsed = int(now - start)
+                progress_cb(f"等待後端啟動… ({elapsed}s)　AI 模型載入中，請稍候")
+
+        # ── 關鍵修復：改為短間隔迴圈，持續呼叫 ui_update_fn() ──
+        # 原本的 time.sleep(1.0) 會凍結主執行緒，讓 tkinter 視窗無法重繪
+        for _ in range(20):       # 20 × 0.05s ≈ 1 秒
+            if ui_update_fn:
+                try:
+                    ui_update_fn()
+                except Exception:
+                    pass
+            time.sleep(0.05)
+
     return False
 
 
@@ -155,12 +180,16 @@ class SplashScreen:
         )
         self._bar.pack(pady=20)
         self._bar.start(10)
+        # 確保視窗第一次就顯示出來
         self.root.update()
 
     def set_message(self, msg: str):
         self._msg_var.set(msg)
         try:
-            self.root.update_idletasks()
+            # ── 關鍵修復：改用 update() 而非 update_idletasks() ──
+            # update_idletasks() 只處理 idle 事件，不會觸發視窗重繪
+            # update() 才能完整處理所有 pending 事件（含 Expose/Configure）
+            self.root.update()
         except Exception:
             pass
 
@@ -522,18 +551,25 @@ def main():
         _start_backend_thread(args.host, args.port)
 
     # 3. 等後端就緒
+    # ── 關鍵修復：傳入 ui_update_fn 讓 splash 在等待期間不凍結 ──
     ready = _wait_for_backend(
         args.host, args.port,
         progress_cb=splash.set_message,
+        ui_update_fn=lambda: splash.root.update(),
     )
     splash.close()
 
     if not ready:
-        tk.Tk().withdraw()
+        # 建立一個新的隱藏根視窗來顯示錯誤（舊的 splash 已被 destroy）
+        _err_root = tk.Tk()
+        _err_root.withdraw()
         messagebox.showerror(
             "aiglass3",
-            f"後端啟動逾時（{HEALTH_TIMEOUT_S}s），請確認環境是否正確。"
+            f"後端啟動逾時（{HEALTH_TIMEOUT_S}s），請確認環境是否正確。\n"
+            f"  - 若後端在遠端，請確認 {args.host}:{args.port} 可連線\n"
+            f"  - 若在本機，請先確認 python main.py 沒有錯誤"
         )
+        _err_root.destroy()
         sys.exit(1)
 
     # 4. 開啟主視窗
