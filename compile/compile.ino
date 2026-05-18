@@ -29,9 +29,9 @@ static const char* AUD_WS_PATH = "/ws_audio";
 #include "camera_pins.h"
 
 framesize_t g_frame_size = FRAMESIZE_QVGA;
-#define JPEG_QUALITY  20
+#define JPEG_QUALITY  17
 #define FB_COUNT      2
-volatile int g_target_fps = 2; // 新增：0=不限，>0 则按该FPS限速发送
+volatile int g_target_fps = 0; // 新增：0=不限，>0 则按该FPS限速发送
 
 // 【新增】视频传输性能监控
 volatile unsigned long frame_captured_count = 0;  // 采集帧计数
