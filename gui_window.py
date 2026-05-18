@@ -7,7 +7,7 @@ aiglass3 桌面視窗（含自動啟動後端）
     python gui_window.py
 
 流程：
-  1. 在背景執行緒中 import main 並以 uvicorn 啟動 FastAPI 後端
+  1. 在背景執行緒中 import app_main 並以 uvicorn 啟動 FastAPI 後端
   2. 等待後端 TCP 連線就緒（最多 90 秒，模型載入時間）
   3. 開啟 tkinter 視窗，連接 /ws/viewer 和 /ws_ui
 
@@ -70,14 +70,14 @@ FIND_BUBBLE = "#2a2010"
 # ════════════════════════════════════════════════════════════
 def _start_backend_thread(host: str, port: int) -> threading.Thread:
     """
-    在獨立執行緒中 import main.py 並以 uvicorn.Server 啟動 FastAPI。
+    在獨立執行緒中 import app_main.py 並以 uvicorn.Server 啟動 FastAPI。
     uvicorn 內部會建立自己的 asyncio event loop，
     與 tkinter 主執行緒完全隔離，不會互相干擾。
     """
     def _run():
         try:
             import uvicorn
-            # import main 會觸發 load_navigation_models 等初始化
+            # ── 關鍵修正：import app_main（含 ESP32 相機支援）而非 main ──
             import app_main as _app_module
             config = uvicorn.Config(
                 app=_app_module.app,
@@ -102,14 +102,6 @@ def _wait_for_backend(host: str, port: int,
                       timeout: float = HEALTH_TIMEOUT_S,
                       progress_cb=None,
                       ui_update_fn=None) -> bool:
-    """
-    輪詢 TCP，等待後端埠開放。
-
-    ui_update_fn 可傳入 tkinter 的 root.update()，
-    確保 splash 視窗在等待期間保持響應（不凍結）。
-    原本的 time.sleep(1.0) 會完全阻塞主執行緒導致視窗凍結，
-    改為 20 × 0.05s 的短迴圈，每次都呼叫 ui_update_fn()。
-    """
     deadline  = time.monotonic() + timeout
     start     = time.monotonic()
     last_msg  = 0.0
@@ -130,8 +122,6 @@ def _wait_for_backend(host: str, port: int,
                 elapsed = int(now - start)
                 progress_cb(f"等待後端啟動… ({elapsed}s)　AI 模型載入中，請稍候")
 
-        # ── 關鍵修復：改為短間隔迴圈，持續呼叫 ui_update_fn() ──
-        # 原本的 time.sleep(1.0) 會凍結主執行緒，讓 tkinter 視窗無法重繪
         for _ in range(20):       # 20 × 0.05s ≈ 1 秒
             if ui_update_fn:
                 try:
@@ -180,15 +170,11 @@ class SplashScreen:
         )
         self._bar.pack(pady=20)
         self._bar.start(10)
-        # 確保視窗第一次就顯示出來
         self.root.update()
 
     def set_message(self, msg: str):
         self._msg_var.set(msg)
         try:
-            # ── 關鍵修復：改用 update() 而非 update_idletasks() ──
-            # update_idletasks() 只處理 idle 事件，不會觸發視窗重繪
-            # update() 才能完整處理所有 pending 事件（含 Expose/Configure）
             self.root.update()
         except Exception:
             pass
@@ -307,6 +293,8 @@ class AIGlassWindow:
         self._asr_status = ("connecting...", False)
         self._fps_count  = 0
         self._fps_timer  = time.monotonic()
+        self._no_signal_shown = False
+        self._no_signal_ts    = 0.0
 
         self._cam_ws = CameraWSThread(f"{self.base_url}/ws/viewer",
                                       self.frame_q, self._on_status_update)
@@ -413,7 +401,7 @@ class AIGlassWindow:
                  bg="#0a0d12", fg="#4d5f73",
                  font=("Consolas", 9)).pack(side=tk.RIGHT, padx=12)
 
-    # ── 輪詢 ──────────────────────────────────────────────
+    # ── 輪詢相機幀 ──────────────────────────────────────────
     def _poll_frames(self):
         data = None
         try:
@@ -421,16 +409,17 @@ class AIGlassWindow:
                 data = self.frame_q.get_nowait()
         except queue.Empty:
             pass
+
         if data is not None:
-            if hasattr(self, '_no_signal_shown'):
-                self._no_signal_shown = False
+            # 收到 ESP32 畫面，清掉等待提示
+            self._no_signal_shown = False
             try:
                 img = Image.open(io.BytesIO(data))
                 lw  = max(320, self._cam_label.winfo_width())
                 lh  = max(240, self._cam_label.winfo_height())
                 img.thumbnail((lw, lh), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
-                self._cam_label.configure(image=photo)
+                self._cam_label.configure(image=photo, text="", compound=tk.CENTER)
                 self._cam_label.image = photo
                 self._fps_count += 1
                 now = time.monotonic()
@@ -441,10 +430,9 @@ class AIGlassWindow:
             except Exception:
                 pass
         else:
-        # 無畫面：顯示等待提示（每秒只更新一次避免閃爍）
+            # 無畫面：顯示等待提示（每秒更新一次避免閃爍）
             now = time.monotonic()
-            if not getattr(self, '_no_signal_shown', False) or \
-                now - getattr(self, '_no_signal_ts', 0) > 1.0:
+            if not self._no_signal_shown or (now - self._no_signal_ts) > 1.0:
                 self._no_signal_shown = True
                 self._no_signal_ts = now
                 self._cam_label.configure(
@@ -456,6 +444,7 @@ class AIGlassWindow:
                 )
                 self._cam_label.image = None
                 self._fps_lbl.config(text="FPS: --")
+
         self.root.after(16, self._poll_frames)
 
     def _poll_messages(self):
@@ -555,7 +544,7 @@ def main():
     parser.add_argument("--host", default=SERVER_HOST,
                         help="伺服器位址（預設 localhost）")
     parser.add_argument("--port", type=int, default=SERVER_PORT,
-                        help="伺服器埠（預設 8081）")
+                        help="伺服器埠（預設 8765）")
     parser.add_argument("--no-server", action="store_true",
                         help="不啟動後端（後端已在執行時使用）")
     args = parser.parse_args()
@@ -569,7 +558,6 @@ def main():
         _start_backend_thread(args.host, args.port)
 
     # 3. 等後端就緒
-    # ── 關鍵修復：傳入 ui_update_fn 讓 splash 在等待期間不凍結 ──
     ready = _wait_for_backend(
         args.host, args.port,
         progress_cb=splash.set_message,
@@ -578,14 +566,13 @@ def main():
     splash.close()
 
     if not ready:
-        # 建立一個新的隱藏根視窗來顯示錯誤（舊的 splash 已被 destroy）
         _err_root = tk.Tk()
         _err_root.withdraw()
         messagebox.showerror(
             "aiglass3",
             f"後端啟動逾時（{HEALTH_TIMEOUT_S}s），請確認環境是否正確。\n"
             f"  - 若後端在遠端，請確認 {args.host}:{args.port} 可連線\n"
-            f"  - 若在本機，請先確認 python main.py 沒有錯誤"
+            f"  - 若在本機，請先確認 python app_main.py 沒有錯誤"
         )
         _err_root.destroy()
         sys.exit(1)
