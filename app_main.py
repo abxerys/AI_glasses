@@ -262,9 +262,11 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 # 注册信号处理器
-signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
-atexit.register(cleanup_on_exit)  # 正常退出时也调用
+import threading as _threading
+if _threading.current_thread() is _threading.main_thread():
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+atexit.register(cleanup_on_exit)
 
 print("[RECORDER] 已注册退出处理器 - Ctrl+C时会自动保存录制文件")
 

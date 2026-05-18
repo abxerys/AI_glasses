@@ -192,8 +192,10 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+import threading as _threading
+if _threading.current_thread() is _threading.main_thread():
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(cleanup_on_exit)
 print("[RECORDER] 已注册退出处理器 - Ctrl+C时会自动保存录制文件")
 
@@ -1258,16 +1260,12 @@ async def on_startup():
 
 @app.on_event("startup")
 async def on_startup_local_cam():
-    """
-    啟動本機 webcam 備援廣播任務。
-    無 ESP32 時自動廣播本機鏡頭畫面到 /ws/viewer。
-    設定環境變數 DISABLE_LOCAL_CAM=1 可停用。
-    """
-    if os.getenv("DISABLE_LOCAL_CAM", "0") != "1":
+    # 預設停用本機 webcam，只有明確設定 ENABLE_LOCAL_CAM=1 才啟動
+    if os.getenv("ENABLE_LOCAL_CAM", "0") == "1":
         asyncio.create_task(_local_webcam_broadcaster())
-        print("[LOCAL_CAM] 本機 webcam 備援任務已啟動（設定 DISABLE_LOCAL_CAM=1 可停用）")
+        print("[LOCAL_CAM] 本機 webcam 備援任務已啟動")
     else:
-        print("[LOCAL_CAM] 本機 webcam 備援已停用（DISABLE_LOCAL_CAM=1）")
+        print("[LOCAL_CAM] 本機 webcam 已停用（設定 ENABLE_LOCAL_CAM=1 可啟用）")
 
 
 @app.on_event("shutdown")

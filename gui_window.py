@@ -78,7 +78,7 @@ def _start_backend_thread(host: str, port: int) -> threading.Thread:
         try:
             import uvicorn
             # import main 會觸發 load_navigation_models 等初始化
-            import main as _app_module
+            import app_main as _app_module
             config = uvicorn.Config(
                 app=_app_module.app,
                 host=host,
@@ -422,6 +422,8 @@ class AIGlassWindow:
         except queue.Empty:
             pass
         if data is not None:
+            if hasattr(self, '_no_signal_shown'):
+                self._no_signal_shown = False
             try:
                 img = Image.open(io.BytesIO(data))
                 lw  = max(320, self._cam_label.winfo_width())
@@ -438,6 +440,22 @@ class AIGlassWindow:
                     self._fps_timer = now
             except Exception:
                 pass
+        else:
+        # 無畫面：顯示等待提示（每秒只更新一次避免閃爍）
+            now = time.monotonic()
+            if not getattr(self, '_no_signal_shown', False) or \
+                now - getattr(self, '_no_signal_ts', 0) > 1.0:
+                self._no_signal_shown = True
+                self._no_signal_ts = now
+                self._cam_label.configure(
+                    image="",
+                    text="📡 等待 ESP32 相機連線…",
+                    fg="#4d5f73",
+                    font=("Microsoft YaHei", 14),
+                    compound=tk.CENTER,
+                )
+                self._cam_label.image = None
+                self._fps_lbl.config(text="FPS: --")
         self.root.after(16, self._poll_frames)
 
     def _poll_messages(self):
