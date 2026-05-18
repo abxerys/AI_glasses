@@ -1257,7 +1257,7 @@ def get_camera_ws():
 
 if __name__ == "__main__":
     uvicorn.run(
-        app, host="0.0.0.0", port=8081,
+        app, host="0.0.0.0", port=8765,
         log_level="warning", access_log=False,
         loop="asyncio", workers=1, reload=False
     )

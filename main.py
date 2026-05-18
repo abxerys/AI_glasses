@@ -45,11 +45,9 @@ except Exception:
     pass
 
 # ---- DashScope ASR 基础 ----
-from dashscope import audio as dash_audio
-
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "sk-a9440db694924559ae4ebdc2023d2b9a")
-if not API_KEY:
-    raise RuntimeError("未设置 DASHSCOPE_API_KEY")
+from groq import AsyncGroq
+GROQ_API_KEY = ""  # ← 換成你的 key
+groq_client  = AsyncGroq(api_key=GROQ_API_KEY)
 
 MODEL        = "paraformer-realtime-v2"
 SAMPLE_RATE  = 16000
@@ -110,12 +108,10 @@ omni_conversation_active = False
 omni_previous_nav_state = None
 
 # ===== 尋物狀態機全域實例 =====
-# TTS 函式在 audio_player 初始化後可用，此處先宣告，ws/camera 連線時完成初始化
 find_item_fsm: Optional[FindItemFSM] = None
 
 
 def _get_or_create_fsm() -> FindItemFSM:
-    """懶初始化：第一次相機連線時建立 FSM（確保 play_voice_text 已可用）"""
     global find_item_fsm
     if find_item_fsm is None:
         find_item_fsm = FindItemFSM(
@@ -127,55 +123,42 @@ def _get_or_create_fsm() -> FindItemFSM:
 
 
 def load_navigation_models():
-    """加载盲道导航所需的模型"""
     global yolo_seg_model, obstacle_detector
-
     try:
         seg_model_path = os.getenv("BLIND_PATH_MODEL", r"model\yolo-seg.pt")
-
         if os.path.exists(seg_model_path):
             print(f"[NAVIGATION] 模型文件存在，开始加载...")
             yolo_seg_model = YOLO(seg_model_path)
-
             if torch.cuda.is_available():
                 yolo_seg_model.to("cuda")
                 print(f"[NAVIGATION] 盲道分割模型加载成功并放到GPU: {yolo_seg_model.device}")
             else:
                 print("[NAVIGATION] CUDA不可用，模型仍在CPU")
-
             try:
                 test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                results = yolo_seg_model.predict(
-                    test_img,
+                yolo_seg_model.predict(test_img,
                     device="cuda" if torch.cuda.is_available() else "cpu",
-                    verbose=False
-                )
-                print(f"[NAVIGATION] 模型测试成功，支持的类别数: {len(yolo_seg_model.names) if hasattr(yolo_seg_model, 'names') else '未知'}")
+                    verbose=False)
+                print(f"[NAVIGATION] 模型测试成功")
             except Exception as e:
                 print(f"[NAVIGATION] 模型测试失败: {e}")
         else:
             print(f"[NAVIGATION] 错误：找不到模型文件: {seg_model_path}")
 
         obstacle_model_path = os.getenv("OBSTACLE_MODEL", r"model\yoloe-11l-seg.pt")
-        print(f"[NAVIGATION] 尝试加载障碍物检测模型: {obstacle_model_path}")
-
         if os.path.exists(obstacle_model_path):
-            print(f"[NAVIGATION] 障碍物检测模型文件存在，开始加载...")
             try:
                 obstacle_detector = ObstacleDetectorClient(model_path=obstacle_model_path)
                 print(f"[NAVIGATION] ========== YOLO-E 障碍物检测器加载成功 ==========")
             except Exception as e:
                 print(f"[NAVIGATION] 障碍物检测器加载失败: {e}")
-                import traceback
-                traceback.print_exc()
+                import traceback; traceback.print_exc()
                 obstacle_detector = None
         else:
-            print(f"[NAVIGATION] 警告：找不到障碍物检测模型文件: {obstacle_model_path}")
-
+            print(f"[NAVIGATION] 警告：找不到障碍物检测模型: {obstacle_model_path}")
     except Exception as e:
         print(f"[NAVIGATION] 模型加载失败: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
 
 
 print("[NAVIGATION] 开始加载导航模型...")
@@ -194,7 +177,6 @@ def cleanup_on_exit():
         print("[SYSTEM] 录制文件已保存")
     except Exception as e:
         print(f"[SYSTEM] 关闭录制器时出错: {e}")
-    # 釋放尋物 FSM 資源
     global find_item_fsm
     if find_item_fsm is not None:
         try:
@@ -213,7 +195,6 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(cleanup_on_exit)
-
 print("[RECORDER] 已注册退出处理器 - Ctrl+C时会自动保存录制文件")
 
 try:
@@ -235,6 +216,117 @@ except Exception as e:
 interrupt_lock = asyncio.Lock()
 
 
+# ════════════════════════════════════════════════════════════
+# 本機 Webcam 備援（localhost 測試用）
+# ════════════════════════════════════════════════════════════
+LOCAL_WEBCAM_INDEX = int(os.getenv("LOCAL_WEBCAM_INDEX", "0"))
+
+
+async def _local_webcam_broadcaster():
+    """
+    無 ESP32 相機連線時，從本機 webcam 讀取畫面並廣播給所有 camera_viewers。
+
+    行為：
+      · ESP32 連線後自動退讓（釋放 webcam）
+      · ESP32 斷線後重新開啟 webcam 接管廣播
+      · 沒有任何 viewer 時暫停讀取（省 CPU）
+      · blocking cap.read() 丟進 ThreadPoolExecutor，不阻塞 asyncio event loop
+
+    停用方法：設定環境變數 DISABLE_LOCAL_CAM=1
+    切換攝影機：設定環境變數 LOCAL_WEBCAM_INDEX=1（預設 0）
+    """
+    import concurrent.futures
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="LocalCam"
+    )
+    loop = asyncio.get_event_loop()
+    cap = None
+    was_esp32 = False
+
+    def _open():
+        c = cv2.VideoCapture(LOCAL_WEBCAM_INDEX)
+        if c.isOpened():
+            c.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+            c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            c.set(cv2.CAP_PROP_FPS,          30)
+        return c
+
+    def _read(c): return c.read()
+    def _rel(c):  c.release()
+
+    try:
+        while True:
+            # ── ESP32 已連接 → 讓出相機 ──
+            if esp32_camera_ws is not None:
+                if cap is not None:
+                    await loop.run_in_executor(executor, _rel, cap)
+                    cap = None
+                    print("[LOCAL_CAM] ESP32 已連接，本機 webcam 暫停")
+                was_esp32 = True
+                await asyncio.sleep(0.5)
+                continue
+
+            if was_esp32:
+                was_esp32 = False
+                print("[LOCAL_CAM] ESP32 已斷線，嘗試開啟本機 webcam…")
+
+            # ── 無觀看者 → 暫停讀取 ──
+            if not camera_viewers:
+                if cap is not None:
+                    await loop.run_in_executor(executor, _rel, cap)
+                    cap = None
+                await asyncio.sleep(0.3)
+                continue
+
+            # ── 開啟相機 ──
+            if cap is None:
+                cap = await loop.run_in_executor(executor, _open)
+                if not cap.isOpened():
+                    print(f"[LOCAL_CAM] 無法開啟 webcam #{LOCAL_WEBCAM_INDEX}，2s 後重試")
+                    cap = None
+                    await asyncio.sleep(2.0)
+                    continue
+                print(f"[LOCAL_CAM] 本機 webcam #{LOCAL_WEBCAM_INDEX} 已開啟，開始廣播")
+
+            # ── 讀取一幀 ──
+            ok, frame = await loop.run_in_executor(executor, _read, cap)
+            if not ok or frame is None:
+                await asyncio.sleep(0.05)
+                continue
+
+            try:
+                ok2, enc = cv2.imencode(".jpg", frame,
+                                        [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            except Exception:
+                ok2 = False
+
+            if ok2:
+                jpeg_data = enc.tobytes()
+                try:
+                    last_frames.append((time.time(), jpeg_data))
+                except Exception:
+                    pass
+                dead = []
+                for vws in list(camera_viewers):
+                    try:
+                        await vws.send_bytes(jpeg_data)
+                    except Exception:
+                        dead.append(vws)
+                for d in dead:
+                    camera_viewers.discard(d)
+
+            await asyncio.sleep(1 / 25)   # ~25 FPS
+
+    except asyncio.CancelledError:
+        if cap is not None:
+            try: cap.release()
+            except Exception: pass
+        executor.shutdown(wait=False)
+
+
+# ════════════════════════════════════════════════════════════
+# 廣播輔助
+# ════════════════════════════════════════════════════════════
 async def ui_broadcast_raw(msg: str):
     dead = []
     for k, ws in list(ui_clients.items()):
@@ -280,20 +372,14 @@ async def full_system_reset(reason: str = ""):
     print("[SYSTEM] full reset done.", flush=True)
 
 
-# ===== 尋物模式啟停（替換原 yolomedia 邏輯）=====
-
+# ===== 尋物模式啟停 =====
 def start_item_search(item_cn: str, label_en: str):
-    """
-    啟動尋物 FSM。
-    呼叫前需確保 orchestrator 已切換至 ITEM_SEARCH 狀態。
-    """
     fsm = _get_or_create_fsm()
     fsm.set_target(item_cn, label_en)
     print(f"[FIND_ITEM] 開始尋找：{item_cn} ({label_en})", flush=True)
 
 
 def stop_item_search_fsm(confirm: bool = False):
-    """停止尋物 FSM（confirm=True 表示使用者確認找到）"""
     global find_item_fsm
     if find_item_fsm is not None:
         if confirm:
@@ -305,10 +391,8 @@ def stop_item_search_fsm(confirm: bool = False):
 
 # ========= 指令路由器 =========
 async def start_ai_with_text_custom(user_text: str):
-    """解析語音指令，分派到對應模式或 AI 對話。"""
     global navigation_active, blind_path_navigator, cross_street_active, cross_street_navigator, orchestrator
 
-    # 在導航/紅綠燈模式下，過濾不相關語音
     if orchestrator:
         current_state = orchestrator.get_state()
         if current_state not in ["CHAT", "IDLE"]:
@@ -325,7 +409,6 @@ async def start_ai_with_text_custom(user_text: str):
                 print(f"[{mode_name}模式] 丢弃非对话语音: {user_text}")
                 return
 
-    # ── 過馬路 ──
     if "开始过马路" in user_text or "帮我过马路" in user_text:
         stop_item_search_fsm()
         if orchestrator:
@@ -346,7 +429,6 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[系统] 导航系统未运行")
         return
 
-    # ── 紅綠燈偵測 ──
     if "检测红绿灯" in user_text or "看红绿灯" in user_text:
         try:
             import trafficlight_detection
@@ -365,7 +447,6 @@ async def start_ai_with_text_custom(user_text: str):
         await ui_broadcast_final("[系统] 红绿灯检测已停止")
         return
 
-    # ── 盲道導航 ──
     if "开始导航" in user_text or "盲道导航" in user_text or "帮我导航" in user_text:
         stop_item_search_fsm()
         if orchestrator:
@@ -395,37 +476,27 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[系统] 导航统领器未初始化")
         return
 
-    # ── 尋物（核心新功能）──
+    # ── 尋物 ──
     find_pattern = r"(?:^\s*帮我)?\s*找一下\s*(.+?)(?:。|！|？|$)"
     match = re.search(find_pattern, user_text)
-
     if match:
         item_cn = match.group(1).strip()
         if item_cn:
             label_en, src = extract_english_label(item_cn)
             print(f"[FIND_ITEM] 尋物指令：'{item_cn}' -> '{label_en}' (src={src})", flush=True)
-
-            # 切換 orchestrator 至尋物模式
             if orchestrator:
                 orchestrator.start_item_search()
-                print(f"[FIND_ITEM] orchestrator 已切換至 ITEM_SEARCH，狀態: {orchestrator.get_state()}")
-
-            # 啟動 FSM
             start_item_search(item_cn, label_en)
-
             play_voice_text(f"好的，正在幫你尋找{item_cn}。")
             await ui_broadcast_final(f"[找物品] 正在寻找 {item_cn}...")
             return
 
-    # ── 找到了 ──
     if "找到了" in user_text or "拿到了" in user_text:
         print("[FIND_ITEM] 使用者確認找到物品", flush=True)
         stop_item_search_fsm(confirm=True)
-
         if orchestrator:
             orchestrator.stop_item_search(restore_nav=True)
             current_state = orchestrator.get_state()
-            print(f"[FIND_ITEM] 找物品結束，當前狀態: {current_state}")
             if current_state in [
                 "BLINDPATH_NAV", "SEEKING_CROSSWALK",
                 "WAIT_TRAFFIC_LIGHT", "CROSSING", "SEEKING_NEXT_BLINDPATH"
@@ -440,17 +511,14 @@ async def start_ai_with_text_custom(user_text: str):
     # ── 一般 AI 對話 ──
     global omni_conversation_active, omni_previous_nav_state
     omni_conversation_active = True
-
     if orchestrator:
         current_state = orchestrator.get_state()
         if current_state not in ["CHAT", "IDLE"]:
             omni_previous_nav_state = current_state
             orchestrator.force_state("CHAT")
-            print(f"[OMNI] 对话开始，从{current_state}切换到CHAT模式")
         else:
             omni_previous_nav_state = None
 
-    # FSM 仍在尋物中時，不進入 AI 對話（避免 CPU 衝突）
     fsm = find_item_fsm
     if fsm is not None and not fsm.is_idle():
         print("[AI] 尋物 FSM 執行中，略過 AI 對話", flush=True)
@@ -459,13 +527,11 @@ async def start_ai_with_text_custom(user_text: str):
     await start_ai_with_text(user_text)
 
 
-# ========= Omni 播放启动 =========
+# ========= Omni 播放 =========
 async def start_ai_with_text(user_text: str):
-    """硬重置後，開啟新的 AI 語音輸出。"""
     async def _runner():
         txt_buf: List[str] = []
         rate_state = None
-
         content_list = []
         if last_frames:
             try:
@@ -487,7 +553,6 @@ async def start_ai_with_text(user_text: str):
                         await ui_broadcast_partial("[AI] " + "".join(txt_buf))
                     except Exception:
                         pass
-
                 if piece.audio_b64:
                     try:
                         pcm24 = base64.b64decode(piece.audio_b64)
@@ -498,7 +563,6 @@ async def start_ai_with_text(user_text: str):
                         pcm8k = audioop.mul(pcm8k, 2, 0.60)
                         if pcm8k:
                             await broadcast_pcm16_realtime(pcm8k)
-
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -509,14 +573,9 @@ async def start_ai_with_text(user_text: str):
         finally:
             global omni_conversation_active, omni_previous_nav_state
             omni_conversation_active = False
-
             if orchestrator and omni_previous_nav_state:
                 orchestrator.force_state(omni_previous_nav_state)
-                print(f"[OMNI] 对话结束，恢复到{omni_previous_nav_state}模式")
                 omni_previous_nav_state = None
-            else:
-                print(f"[OMNI] 对话结束（无需恢复导航状态）")
-
             from audio_stream import stream_clients
             for sc in list(stream_clients):
                 if not sc.abort_event.is_set():
@@ -524,7 +583,6 @@ async def start_ai_with_text(user_text: str):
                     except Exception: pass
                     try: sc.q.put_nowait(None)
                     except Exception: pass
-
             final_text = ("".join(txt_buf)).strip() or "（空响应）"
             try:
                 await ui_broadcast_final("[AI] " + final_text)
@@ -575,7 +633,7 @@ async def ws_audio(ws: WebSocket):
     global esp32_audio_ws
     esp32_audio_ws = ws
     await ws.accept()
-    print("\n[AUDIO] client connected")
+    print("\n[AUDIO] ESP32 audio client connected")
     recognition = None
     streaming = False
     last_ts = time.monotonic()
@@ -652,11 +710,8 @@ async def ws_audio(ws: WebSocket):
                         full_system_reset_fn=full_system_reset,
                         interrupt_lock=interrupt_lock,
                     )
-
-                    recognition = dash_audio.asr.Recognition(
-                        api_key=API_KEY, model=MODEL, format=AUDIO_FMT,
-                        sample_rate=SAMPLE_RATE, callback=cb
-                    )
+                    recognition = groq_client.audio.transcriptions
+                    streaming = True
                     recognition.start()
                     await set_current_recognition(recognition)
                     streaming = True
@@ -671,7 +726,6 @@ async def ws_audio(ws: WebSocket):
                             try: recognition.send_audio_frame(SILENCE_20MS)
                             except Exception: break
                     await stop_rec(send_notice="OK:STOPPED")
-
                     latest_wav = sync_recorder.get_latest_audio_path()
                     if latest_wav:
                         asyncio.create_task(process_voice_file_to_ai(latest_wav, cb))
@@ -704,7 +758,145 @@ async def ws_audio(ws: WebSocket):
             pass
         if esp32_audio_ws is ws:
             esp32_audio_ws = None
-        print("[WS] connection closed")
+        print("[WS] ESP32 audio connection closed")
+
+
+# ---------- WebSocket：瀏覽器麥克風入口（localhost 測試用）----------
+@app.websocket("/ws/browser_audio")
+async def ws_browser_audio(ws: WebSocket):
+    """
+    接收瀏覽器 getUserMedia 麥克風的 PCM16/16000Hz 音訊。
+    與 /ws_audio (ESP32) 協議完全相容：START / STOP / binary PCM bytes。
+
+    使用場景：localhost 測試（無 ESP32 時用瀏覽器 mic 代替）。
+    當 ESP32 已連線時拒絕瀏覽器連線，避免兩路同時使用衝突。
+    """
+    if esp32_audio_ws is not None:
+        await ws.close(code=1013, reason="ESP32 audio already connected; disconnect it first")
+        return
+
+    await ws.accept()
+    print("\n[BROWSER_MIC] 瀏覽器麥克風已連接")
+    await ui_broadcast_partial("（瀏覽器麥克風模式）")
+
+    recognition = None
+    streaming = False
+    last_ts = time.monotonic()
+    keepalive_task: Optional[asyncio.Task] = None
+
+    async def stop_rec(send_notice: Optional[str] = None):
+        nonlocal recognition, streaming, keepalive_task
+        if keepalive_task and not keepalive_task.done():
+            keepalive_task.cancel()
+            try: await keepalive_task
+            except Exception: pass
+        keepalive_task = None
+        if recognition:
+            try: recognition.stop()
+            except Exception: pass
+            recognition = None
+        await set_current_recognition(None)
+        streaming = False
+        if send_notice:
+            try: await ws.send_text(send_notice)
+            except Exception: pass
+
+    async def on_sdk_error(_msg: str):
+        await stop_rec(send_notice="RESTART")
+
+    async def keepalive_loop():
+        nonlocal last_ts, recognition, streaming
+        try:
+            while streaming and recognition is not None:
+                idle = time.monotonic() - last_ts
+                if idle > 0.35:
+                    try:
+                        for _ in range(30):
+                            recognition.send_audio_frame(SILENCE_20MS)
+                        last_ts = time.monotonic()
+                    except Exception:
+                        await on_sdk_error("browser_mic keepalive failed")
+                        return
+                await asyncio.sleep(0.10)
+        except asyncio.CancelledError:
+            return
+
+    try:
+        while True:
+            if ws.client_state != WebSocketState.CONNECTED:
+                break
+            try:
+                msg = await ws.receive()
+            except WebSocketDisconnect:
+                break
+            except RuntimeError as e:
+                if "Cannot call \"receive\"" in str(e):
+                    break
+                raise
+
+            if "text" in msg and msg["text"] is not None:
+                raw = (msg["text"] or "").strip()
+                cmd = raw.upper()
+
+                if cmd == "START":
+                    print("[BROWSER_MIC] START received")
+                    await stop_rec()
+                    loop = asyncio.get_running_loop()
+                    def post(coro):
+                        asyncio.run_coroutine_threadsafe(coro, loop)
+
+                    cb = ASRCallback(
+                        on_sdk_error=lambda s: post(on_sdk_error(s)),
+                        post=post,
+                        ui_broadcast_partial=ui_broadcast_partial,
+                        ui_broadcast_final=ui_broadcast_final,
+                        is_playing_now_fn=is_playing_now,
+                        start_ai_with_text_fn=start_ai_with_text_custom,
+                        full_system_reset_fn=full_system_reset,
+                        interrupt_lock=interrupt_lock,
+                    )
+                    recognition = groq_client.audio.transcriptions
+                    streaming = True
+                    recognition.start()
+                    await set_current_recognition(recognition)
+                    streaming = True
+                    last_ts = time.monotonic()
+                    keepalive_task = asyncio.create_task(keepalive_loop())
+                    await ui_broadcast_partial("（瀏覽器麥克風錄音中…）")
+                    await ws.send_text("OK:STARTED")
+
+                elif cmd == "STOP":
+                    if recognition:
+                        for _ in range(15):
+                            try: recognition.send_audio_frame(SILENCE_20MS)
+                            except Exception: break
+                    await stop_rec(send_notice="OK:STOPPED")
+
+                elif raw.startswith("PROMPT:"):
+                    text = raw[len("PROMPT:"):].strip()
+                    if text:
+                        async with interrupt_lock:
+                            await start_ai_with_text_custom(text)
+                        await ws.send_text("OK:PROMPT_ACCEPTED")
+
+            elif "bytes" in msg and msg["bytes"] is not None:
+                if streaming and recognition:
+                    try:
+                        recognition.send_audio_frame(msg["bytes"])
+                        last_ts = time.monotonic()
+                    except Exception:
+                        await on_sdk_error("browser_mic send_audio_frame failed")
+
+    except Exception as e:
+        print(f"[BROWSER_MIC ERROR] {e}")
+    finally:
+        await stop_rec()
+        try:
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.close(code=1000)
+        except Exception:
+            pass
+        print("[BROWSER_MIC] 瀏覽器麥克風已斷線")
 
 
 # ---------- WebSocket：ESP32 相机入口 ----------
@@ -720,16 +912,13 @@ async def ws_camera_esp(ws: WebSocket):
     await ws.accept()
     print("[CAMERA] ESP32 connected")
 
-    # 初始化導航器
     if blind_path_navigator is None and yolo_seg_model is not None:
         blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
         print("[NAVIGATION] 盲道导航器已初始化")
 
     if cross_street_navigator is None and yolo_seg_model:
         cross_street_navigator = CrossStreetNavigator(
-            seg_model=yolo_seg_model,
-            coco_model=None,
-            obs_model=None
+            seg_model=yolo_seg_model, coco_model=None, obs_model=None
         )
         print("[CROSS_STREET] 过马路导航器已初始化")
 
@@ -737,9 +926,7 @@ async def ws_camera_esp(ws: WebSocket):
         orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
         print("[NAV MASTER] 统领状态机已初始化")
 
-    # 初始化尋物 FSM
     fsm = _get_or_create_fsm()
-
     frame_counter = 0
 
     try:
@@ -760,7 +947,6 @@ async def ws_camera_esp(ws: WebSocket):
                 except Exception:
                     pass
 
-                # 解碼
                 try:
                     arr = np.frombuffer(data, dtype=np.uint8)
                     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -774,7 +960,7 @@ async def ws_camera_esp(ws: WebSocket):
                     fsm_state = fsm.state.name if fsm else "N/A"
                     print(f"[DEBUG] 帧:{frame_counter} orch={state_dbg} fsm={fsm_state}")
 
-                # ── 尋物模式：FSM 接管畫面 ──
+                # ── 尋物模式：FSM 接管 ──
                 if orchestrator and orchestrator.get_state() == "ITEM_SEARCH" and bgr is not None:
                     out_frame = fsm.step(bgr)
                     if camera_viewers and out_frame is not None:
@@ -792,7 +978,7 @@ async def ws_camera_esp(ws: WebSocket):
                                 camera_viewers.discard(d)
                     continue
 
-                # ── 其他導航模式：orchestrator 接管 ──
+                # ── 其他導航模式 ──
                 if orchestrator and bgr is not None:
                     current_state = orchestrator.get_state()
                     out_img = bgr
@@ -863,7 +1049,6 @@ async def ws_camera_esp(ws: WebSocket):
             pass
         esp32_camera_ws = None
         print("[CAMERA] ESP32 disconnected")
-
         if blind_path_navigator:
             blind_path_navigator.reset()
         if cross_street_navigator:
@@ -1071,6 +1256,20 @@ async def on_startup():
     await loop.create_datagram_endpoint(lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT))
 
 
+@app.on_event("startup")
+async def on_startup_local_cam():
+    """
+    啟動本機 webcam 備援廣播任務。
+    無 ESP32 時自動廣播本機鏡頭畫面到 /ws/viewer。
+    設定環境變數 DISABLE_LOCAL_CAM=1 可停用。
+    """
+    if os.getenv("DISABLE_LOCAL_CAM", "0") != "1":
+        asyncio.create_task(_local_webcam_broadcaster())
+        print("[LOCAL_CAM] 本機 webcam 備援任務已啟動（設定 DISABLE_LOCAL_CAM=1 可停用）")
+    else:
+        print("[LOCAL_CAM] 本機 webcam 備援已停用（DISABLE_LOCAL_CAM=1）")
+
+
 @app.on_event("shutdown")
 async def on_shutdown():
     print("[SHUTDOWN] 开始清理资源...")
@@ -1091,7 +1290,7 @@ def get_camera_ws():
 
 if __name__ == "__main__":
     uvicorn.run(
-        app, host="0.0.0.0", port=8081,
+        app, host="0.0.0.0", port=8765,
         log_level="warning", access_log=False,
         loop="asyncio", workers=1, reload=False
     )
