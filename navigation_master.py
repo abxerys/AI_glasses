@@ -431,7 +431,7 @@ class NavigationMaster:
     # ----- 主循环 -----
     def process_frame(self, bgr: np.ndarray) -> OrchestratorResult:
         now = time.time()
-        
+        say = ""
         # 【修改】IDLE状态默认进入CHAT模式，而不是自动开始导航
         if self.state == IDLE:
             self.state = CHAT

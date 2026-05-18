@@ -18,7 +18,7 @@ using namespace websockets;
 // ===== WiFi / Server =====
 const char* WIFI_SSID   = "D-Link_DIR-13";
 const char* WIFI_PASS   = "0918850082";
-const char* SERVER_HOST = "192.168.100.2";
+const char* SERVER_HOST = "192.168.100.4";
 const uint16_t SERVER_PORT = 8081;
 
 static const char* CAM_WS_PATH = "/ws/camera";
@@ -28,8 +28,8 @@ static const char* AUD_WS_PATH = "/ws_audio";
 #define CAMERA_MODEL_XIAO_ESP32S3
 #include "camera_pins.h"
 
-framesize_t g_frame_size = FRAMESIZE_VGA;
-#define JPEG_QUALITY  30
+framesize_t g_frame_size = FRAMESIZE_QVGA;
+#define JPEG_QUALITY  20
 #define FB_COUNT      2
 volatile int g_target_fps = 2; // 新增：0=不限，>0 则按该FPS限速发送
 

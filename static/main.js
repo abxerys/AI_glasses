@@ -840,6 +840,6 @@ import { GLTFLoader } from 'https://unpkg.com/three@0.155.0/examples/jsm/loaders
   };
 
   // 初次与窗口改变时，保持左右上下对齐
-  window.addEventListener('resize', resize);
-  resize();
+  //window.addEventListener('resize', resize);
+  //resize();
 })();
