@@ -19,7 +19,12 @@ WS_PORT = 8765
 
 STT_MODEL = "small"
 STT_LANGUAGE = "zh"
-STT_DEVICE = "auto"
+# Force CPU. "auto" picks CUDA when torch is built with CUDA support, even on
+# machines without the matching cuBLAS DLLs, which then crashes at first
+# inference. CPU + int8 runs at ~0.5–1 s per 1.5 s chunk on modern laptops,
+# which is fine for this demo. Switch to "cuda" only if you've verified the
+# CUDA toolkit is installed and cublas64_12.dll resolves on PATH.
+STT_DEVICE = "cpu"
 STT_COMPUTE_TYPE = "int8"
 STT_CHUNK_SECONDS = 1.5
 
