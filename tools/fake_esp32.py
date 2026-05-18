@@ -1,0 +1,119 @@
+"""Pretends to be an ESP32-S3 over WebSocket using the laptop's webcam + mic + speaker.
+
+Usage:
+    python tools/fake_esp32.py
+    python tools/fake_esp32.py --host localhost --camera 0 --fps 10
+
+Three concurrent WS connections are opened to the edge server:
+    /ws/video      send JPEG frames from the webcam
+    /ws/audio_in   send PCM16 mono 16kHz from the mic
+    /ws/audio_out  receive MP3 from the server and play through speakers
+"""
+
+import argparse
+import asyncio
+import io
+import logging
+
+import cv2
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+import websockets
+
+log = logging.getLogger("fake_esp32")
+
+SAMPLE_RATE = 16000
+MIC_CHUNK_MS = 250
+
+
+async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int) -> None:
+    cap = cv2.VideoCapture(camera)
+    if not cap.isOpened():
+        raise RuntimeError(f"cannot open camera {camera}")
+    period = 1.0 / fps
+    try:
+        async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
+            log.info("video connected: %s", uri)
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    await asyncio.sleep(0.05)
+                    continue
+                ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+                if not ok:
+                    continue
+                await ws.send(buf.tobytes())
+                await asyncio.sleep(period)
+    finally:
+        cap.release()
+
+
+async def stream_audio_in(uri: str) -> None:
+    queue: asyncio.Queue[bytes] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    chunk_frames = int(SAMPLE_RATE * MIC_CHUNK_MS / 1000)
+
+    def _cb(indata, _frames, _t, _status):
+        pcm16 = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+        loop.call_soon_threadsafe(queue.put_nowait, pcm16)
+
+    stream = sd.InputStream(
+        samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+        blocksize=chunk_frames, callback=_cb,
+    )
+    stream.start()
+    try:
+        async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
+            log.info("audio_in connected: %s", uri)
+            while True:
+                chunk = await queue.get()
+                await ws.send(chunk)
+    finally:
+        stream.stop()
+        stream.close()
+
+
+async def receive_audio_out(uri: str) -> None:
+    async with websockets.connect(uri, max_size=8 * 1024 * 1024) as ws:
+        log.info("audio_out connected: %s", uri)
+        async for msg in ws:
+            if not isinstance(msg, (bytes, bytearray)):
+                continue
+            try:
+                data, sr = sf.read(io.BytesIO(msg), dtype="float32")
+            except Exception:
+                log.exception("decode mp3 failed (need libsndfile with mp3 support)")
+                continue
+            try:
+                sd.play(data, sr, blocking=False)
+            except Exception:
+                log.exception("playback failed")
+
+
+async def amain(args) -> None:
+    base = f"ws://{args.host}:{args.port}"
+    await asyncio.gather(
+        stream_video(f"{base}/ws/video", args.camera, args.fps, args.jpeg_quality),
+        stream_audio_in(f"{base}/ws/audio_in"),
+        receive_audio_out(f"{base}/ws/audio_out"),
+    )
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", default="localhost")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--fps", type=int, default=10)
+    p.add_argument("--jpeg-quality", type=int, default=75)
+    args = p.parse_args()
+    try:
+        asyncio.run(amain(args))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
