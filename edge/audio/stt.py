@@ -32,12 +32,23 @@ class WhisperSTT:
             pcm_f32_16k = pcm_f32_16k.reshape(-1)
         if pcm_f32_16k.dtype != np.float32:
             pcm_f32_16k = pcm_f32_16k.astype(np.float32)
+
+        # Cheap silence gate: if the chunk is below ~-46 dBFS, skip Whisper
+        # entirely. This is faster and more reliable than Silero VAD on the
+        # 1.5 s chunks we feed in. We log the RMS so the user can tell
+        # whether the mic is actually picking anything up.
+        rms = float(np.sqrt(np.mean(pcm_f32_16k ** 2)))
+        if rms < 0.005:
+            log.debug("audio chunk silent (rms=%.4f), skip", rms)
+            return ""
+        log.info("STT input rms=%.4f duration=%.2fs", rms, len(pcm_f32_16k) / 16000)
+
         segments, _info = self.model.transcribe(
             pcm_f32_16k,
             language=self.language,
             beam_size=1,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
+            # vad_filter disabled — it was eating every short chunk. Our RMS
+            # gate above already prevents transcription on pure silence.
         )
         return "".join(seg.text for seg in segments).strip()
 

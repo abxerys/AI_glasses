@@ -45,11 +45,13 @@ async def _connect_with_retry(uri: str, label: str):
             await asyncio.sleep(CONNECT_RETRY_DELAY)
 
 
-async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int) -> None:
+async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int,
+                        preview: bool) -> None:
     cap = cv2.VideoCapture(camera)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open camera {camera}")
     period = 1.0 / fps
+    win = "AI_glasses preview (fake_esp32)" if preview else None
     try:
         ws = await _connect_with_retry(uri, "video")
         async with ws:
@@ -62,17 +64,32 @@ async def stream_video(uri: str, camera: int, fps: int, jpeg_quality: int) -> No
                 if not ok:
                     continue
                 await ws.send(buf.tobytes())
+                if win is not None:
+                    cv2.imshow(win, frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        raise KeyboardInterrupt
                 await asyncio.sleep(period)
     finally:
         cap.release()
+        if win is not None:
+            cv2.destroyAllWindows()
 
 
 async def stream_audio_in(uri: str) -> None:
     queue: asyncio.Queue[bytes] = asyncio.Queue()
     loop = asyncio.get_running_loop()
     chunk_frames = int(SAMPLE_RATE * MIC_CHUNK_MS / 1000)
+    last_log = [0.0]
 
     def _cb(indata, _frames, _t, _status):
+        rms = float(np.sqrt(np.mean(indata[:, 0] ** 2)))
+        import time as _t
+        now = _t.monotonic()
+        # log mic level once a second so user can see if anything is being captured
+        if now - last_log[0] >= 1.0:
+            log.info("mic rms=%.4f %s", rms,
+                     "(silent)" if rms < 0.005 else "(speaking)")
+            last_log[0] = now
         pcm16 = (indata[:, 0] * 32767).astype(np.int16).tobytes()
         loop.call_soon_threadsafe(queue.put_nowait, pcm16)
 
@@ -112,10 +129,17 @@ async def receive_audio_out(uri: str) -> None:
 async def amain(args) -> None:
     base = f"ws://{args.host}:{args.port}"
     await asyncio.gather(
-        stream_video(f"{base}/ws/video", args.camera, args.fps, args.jpeg_quality),
+        stream_video(f"{base}/ws/video", args.camera, args.fps,
+                     args.jpeg_quality, args.preview),
         stream_audio_in(f"{base}/ws/audio_in"),
         receive_audio_out(f"{base}/ws/audio_out"),
     )
+
+
+def _list_audio_devices() -> None:
+    print(sd.query_devices())
+    print(f"\ndefault input  : {sd.default.device[0]}")
+    print(f"default output : {sd.default.device[1]}")
 
 
 def main() -> None:
@@ -126,7 +150,21 @@ def main() -> None:
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--jpeg-quality", type=int, default=75)
+    p.add_argument("--preview", action="store_true",
+                   help="show webcam frames in a window; press q to quit")
+    p.add_argument("--list-mics", action="store_true",
+                   help="print available audio devices and exit")
+    p.add_argument("--mic", type=int, default=None,
+                   help="sounddevice input device index (use --list-mics to find)")
     args = p.parse_args()
+
+    if args.list_mics:
+        _list_audio_devices()
+        return
+
+    if args.mic is not None:
+        sd.default.device = (args.mic, sd.default.device[1])
+
     try:
         asyncio.run(amain(args))
     except KeyboardInterrupt:

@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(sudo apt-get install -y libgles2-mesa-dev libegl1 libopengl0)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
