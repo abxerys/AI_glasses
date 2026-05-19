@@ -459,12 +459,21 @@ class NavigationMaster:
         
         # 【新增】找物品模式：只返回原始画面，由yolomedia处理
         if self.state == ITEM_SEARCH:
+            ann_img = bgr.copy()
+            if hasattr(self, 'find') and self.find:
+                try:
+                    # 💡 理由：在主迴圈內直接取得畫好紅色目標框的影像與語音指令，零延遲。
+                    ann_img, find_say, state_info = self.find.process_frame(bgr)
+                    if find_say: say = find_say
+                except Exception as e:
+                    print(f"[FIND ERROR] {e}")
+                    
             return OrchestratorResult(
-                annotated_image=bgr,
-                guidance_text="",
+                annotated_image=ann_img, # 這裡回傳的影像已經包含了 YOLO 框
+                guidance_text=self._say(now, say),
                 display_text=self._display(now, say),
                 state="ITEM_SEARCH",
-                extras={"mode": "找物品模式", "prev_nav_state": self.prev_nav_state_before_search}
+                extras={"mode": "找物品模式"}
             )
 
         # 冷却期内允许继续输出画面，但避免"瞬时切换"
