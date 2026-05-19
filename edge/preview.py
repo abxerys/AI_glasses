@@ -79,7 +79,9 @@ async def preview_loop(hub, bus: PreviewBus | None = None,
                     break
             await asyncio.sleep(period)
     finally:
+        # cv2.destroyWindow can raise on shutdown (e.g. if the headless build
+        # was loaded), and we don't want that to mask the original error.
         try:
             cv2.destroyWindow(window)
-        except cv2.error:
+        except Exception:
             pass
