@@ -29,6 +29,13 @@ AUDIO_OUT_SAMPLE_RATE = 16000
 # to keep playback latency low.
 AUDIO_OUT_CHUNK_BYTES = 2048
 
+# cv2.flip() code applied to every incoming video frame.
+#   -1 = flip both axes (= 180° rotation, correct for OV3660 on XIAO ESP32-S3)
+#    1 = horizontal mirror only
+#    0 = vertical flip only
+# None = do not flip (ESP32 firmware already corrects orientation).
+VIDEO_FLIP_CODE: int | None = -1
+
 STT_MODEL = "base"
 STT_LANGUAGE = "zh"
 # Force CPU. "auto" picks CUDA when torch is built with CUDA support, even on

@@ -39,14 +39,12 @@ bool camera_begin() {
     return false;
   }
 
-  // OV3660 reports a flipped image relative to OV2640 on the XIAO Sense's
-  // physical orientation. We flip both axes here so the user gets the same
-  // upright frame regardless of which sensor is mounted.
+  // OV3660 orientation is corrected server-side (edge/server.py VIDEO_FLIP_CODE = -1).
+  // Do not apply sensor-side flip here; it would double-flip and produce the
+  // wrong orientation again.
 #if defined(AIGLS_CAMERA_OV3660)
   sensor_t *s = esp_camera_sensor_get();
   if (s != nullptr) {
-    s->set_vflip(s, 1);
-    s->set_hmirror(s, 1);
     s->set_brightness(s, 1);
     s->set_saturation(s, 0);
   }

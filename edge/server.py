@@ -7,6 +7,9 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
+from edge.config import VIDEO_FLIP_CODE
+
+
 class StreamHub:
     """Routes WebSocket messages between ESP32-S3 and the rest of the app.
 
@@ -54,6 +57,8 @@ class StreamHub:
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            if VIDEO_FLIP_CODE is not None:
+                frame = cv2.flip(frame, VIDEO_FLIP_CODE)
             self.latest_frame = frame
             if self.video_q.full():
                 try:
