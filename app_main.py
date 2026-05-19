@@ -366,8 +366,18 @@ async def start_ai_with_text_custom(user_text: str):
         match = re.search(find_pattern, user_text)
         item_cn = match.group(1).strip() if match else "物品"
         label_en, src = extract_english_label(item_cn)
+<<<<<<< HEAD
         if orchestrator: orchestrator.start_item_search()
         start_yolomedia_with_target(label_en)
+=======
+        
+        if orchestrator: 
+            # 💡 理由：喚醒總導航器的 ITEM_SEARCH 狀態，讓後端接管所有運算
+            orchestrator.start_item_search()
+            if hasattr(orchestrator, 'find') and orchestrator.find:
+                orchestrator.find.set_target(label_en)
+                
+>>>>>>> feature/find-object-wip
         await ui_broadcast_final(f"[找物品] 正在尋找 {item_cn}...")
         play_voice_text(f"正在尋找 {item_cn}。")
         return
