@@ -13,6 +13,12 @@ Three concurrent WS connections are opened to the edge server:
 import argparse
 import asyncio
 import logging
+import sys
+from pathlib import Path
+
+# Make `from edge.config import …` work when this is launched as
+# `python tools/fake_esp32.py` from the repo root (no `-m`).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
