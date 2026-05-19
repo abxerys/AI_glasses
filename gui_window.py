@@ -8,7 +8,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 SERVER_BROADCAST_URL = "ws://127.0.0.1:8765/ws/viewer"
 
-<<<<<<< HEAD
 流程：
   1. 在背景執行緒中 import app_main 並以 uvicorn 啟動 FastAPI 後端
   2. 等待後端 TCP 連線就緒（最多 90 秒，模型載入時間）
@@ -181,29 +180,6 @@ class SplashScreen:
             self.root.update()
         except Exception:
             pass
-=======
-class IntegratedGuiWindow:
-    def __init__(self):
-        # 畫布總尺寸設定為標準 720p (16:9)
-        self.canvas_w = 1280
-        self.canvas_h = 720
-        self.cam_w = 960  # 相機區塊寬度 (映射 4:3 比例的完美大小)
-        self.sidebar_w = self.canvas_w - self.cam_w
-        
-        self.logs = [
-            "[系統] 核心整合主視窗啟動成功。",
-            "[系統] 正在連接本地埠號 8765...",
-            "[提示] 智慧眼鏡對話日誌將實時滾動顯示。"
-        ]
-        
-        # 載入系統字型支援繁體中文
-        try:
-            self.font_title = ImageFont.truetype("msjh.ttc", 22)  # 微軟正黑體
-            self.font_text = ImageFont.truetype("msjh.ttc", 16)
-        except IOError:
-            self.font_title = ImageFont.load_default()
-            self.font_text = ImageFont.load_default()
->>>>>>> feature/find-object-wip
 
     def add_dialogue_log(self, text: str):
         """新增一筆對話紀錄"""
@@ -272,7 +248,6 @@ async def main_gui_loop():
     
     while True:
         try:
-<<<<<<< HEAD
             self._bar.stop()
             self.root.destroy()
         except Exception:
@@ -673,35 +648,6 @@ def main():
     win = AIGlassWindow(host=args.host, port=args.port)
     win.run()
 
-=======
-            async with websockets.connect(SERVER_BROADCAST_URL) as ws:
-                print("[GUI] 成功連接核心伺服器！已開啟 720p 整合視窗。")
-                cv2.namedWindow("AI Glasses - Combined Terminal Window", cv2.WINDOW_NORMAL)
-                gui.add_dialogue_log("[系統] 成功接入遠端影像流，即時同步中。")
-                
-                while True:
-                    frame_bytes = await ws.recv()
-                    
-                    np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-                    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    
-                    if image is not None:
-                        # 渲染新版標準化畫布
-                        combined_ui = gui.construct_combined_interface(image)
-                        cv2.imshow("AI Glasses - Combined Terminal Window", combined_ui)
-                    
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        print("[GUI] 使用者主動關閉視窗。")
-                        return
-                        
-                    await asyncio.sleep(0.001)
-                    
-        except Exception as e:
-            print(f"[GUI 異常斷線] 連線中斷: {e}")
-            print("[GUI] 將在 3 秒後自動重試...")
-            cv2.destroyAllWindows()
-            await asyncio.sleep(3)
->>>>>>> feature/find-object-wip
 
 if __name__ == "__main__":
     try:

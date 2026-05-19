@@ -111,7 +111,7 @@ class HandResult:
 #  YOLO 偵測器（懶載入）
 # ════════════════════════════════════════════════════════
 class YoloDetector:
-    def __init__(self, weights="yolov8n.pt", device="cpu", conf=0.35):
+    def __init__(self, weights="yolov8s.pt", device="cpu", conf=0.2):
         self.weights = weights
         self.device  = device
         self.conf    = conf
@@ -208,7 +208,7 @@ class FindItemFSM:
     HEAD_RIGHT  = 0.60
     CENTER_LO   = 0.35
     CENTER_HI   = 0.65
-    CENTER_REQ  = 10
+    CENTER_REQ  = 5
     HAND_TOL    = 0.08
     GRAB_R      = 0.10
     IOU_THRESH  = 0.30
@@ -216,7 +216,7 @@ class FindItemFSM:
     HEAD_INT    = 1.2
     HAND_INT    = 0.6
     SEARCH_INT  = 2.0
-    OBJ_MEM     = 2.0
+    OBJ_MEM     = 4.0
 
     def __init__(self, tts_fn: Callable[[str], None]):
         import concurrent.futures
@@ -385,7 +385,10 @@ class FindItemFSM:
             self._exec.submit(self._tts, text)
 
     def _process_speech(self, text: str):
-        """背景執行緒：快速關鍵字 + 選配 Groq LLM 語意分析"""
+        """
+        背景執行緒：解析語音意圖。
+        優先關鍵字快速判斷，其次使用 aiglass3 的 qwen_extractor（不需 GROQ_API_KEY）。
+        """
         confirm_kw = ["拿到", "確認", "完成", "找到", "到了", "好了"]
         stop_kw    = ["結束", "停止", "不要", "關閉", "停", "取消"]
 
@@ -398,35 +401,23 @@ class FindItemFSM:
                 self._reset()
             return
 
-        # 選配 Groq LLM（若設有 GROQ_API_KEY）
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        if not groq_key:
-            log.warning("[FSM] GROQ_API_KEY 未設定，跳過 LLM 解析：%s", text)
-            return
+        # ── 使用 aiglass3 qwen_extractor 解析物品名稱 ──
+        # 從「找 xxx」「幫我找 xxx」句型抽取物品詞
+        m = re.search(r"找(?:一下|一個|個|下)?\s*(.{1,8}?)(?:$|[，。？！,!?])", text)
+        query = m.group(1).strip() if m else text.strip()
+
         try:
-            import json
-            from groq import Groq
-            client = Groq(api_key=groq_key)
-            prompt = (
-                '你是智慧眼鏡指令分析大腦。若使用者想找物品，回傳 '
-                '{"intent":"FIND_ITEM","target_zh":"中文名","target_en":"英文YOLO類別"}，'
-                '否則回傳 {"intent":"UNKNOWN"}。只回 JSON，不要其他文字。\n'
-                f'使用者說：「{text}」'
-            )
-            res = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                response_format={"type": "json_object"},
-            )
-            data = json.loads(res.choices[0].message.content)
-            if data.get("intent") == "FIND_ITEM":
-                zh = data.get("target_zh", "")
-                en = data.get("target_en", "")
-                if zh and en:
-                    self.set_target(zh, en)
+            from qwen_extractor import extract_english_label
+            en, source = extract_english_label(query)
+            # source == 'fallback' 且 en == 'bottle' 代表解析失敗（除非真的在找水瓶）
+            if source == "fallback" and en == "bottle" and "水" not in query and "瓶" not in query:
+                log.warning("[FSM] qwen_extractor 無法解析：%s，跳過", text)
+                return
+            zh = query
+            log.info("[FSM] qwen_extractor '%s' → en='%s' (source=%s)", query, en, source)
+            self.set_target(zh, en)
         except Exception as e:
-            log.warning("[FSM] LLM 解析失敗：%s", e)
+            log.warning("[FSM] qwen_extractor 失敗：%s", e)
 
 
 # ════════════════════════════════════════════════════════
@@ -598,24 +589,59 @@ class _MicListener:
     def stop(self):  self._stop.set()
 
     def _load_stt(self):
-        # 優先嘗試 aiglass2 的 WhisperSTT
+    # ── 優先：faster-whisper（直接餵 numpy float32，不需 soundfile）──
         try:
-            sys.path.insert(0, str(Path(__file__).parent))
-            from audio.stt import WhisperSTT
-            return WhisperSTT(model_size=self._model_size, language="zh")
+            from faster_whisper import WhisperModel
+            _model = WhisperModel(
+                self._model_size, device="cpu", compute_type="int8"
+            )
+            log.info("[MIC] faster-whisper 載入成功：%s", self._model_size)
+
+            class _FasterWhisperWrap:
+                """
+                直接將 int16 PCM numpy array 轉為 float32 傳給 faster-whisper，
+                完全不需要 soundfile / scipy 等額外套件。
+                """
+                def __init__(self, model):
+                    self._m = model
+
+                def transcribe_pcm(self, pcm: np.ndarray, sr: int) -> str:
+                    audio_f32 = pcm.astype(np.float32) / 32768.0
+                    segments, _ = self._m.transcribe(
+                        audio_f32,
+                        language="zh",
+                        beam_size=5,
+                        vad_filter=True,
+                        vad_parameters={"min_silence_duration_ms": 300},
+                    )
+                    return "".join(seg.text for seg in segments).strip()
+
+            return _FasterWhisperWrap(_model)
+
         except ImportError:
-            pass
-        # 退回到 openai-whisper
+            log.warning("[MIC] faster-whisper 未安裝，嘗試 openai-whisper...")
+
+        # ── 退回：openai-whisper ──
         try:
             import whisper as _w
             m = _w.load_model(self._model_size)
-            class _Wrap:
-                def transcribe_pcm(self, pcm, sr):
-                    a = pcm.astype(np.float32) / 32768.
-                    return _w.transcribe(m, a, language="zh")["text"]
-            return _Wrap()
+            log.info("[MIC] openai-whisper 載入成功：%s", self._model_size)
+
+            class _OpenAIWhisperWrap:
+                def __init__(self, model):
+                    self._m = model
+
+                def transcribe_pcm(self, pcm: np.ndarray, sr: int) -> str:
+                    import whisper
+                    audio_f32 = pcm.astype(np.float32) / 32768.0
+                    return whisper.transcribe(
+                        self._m, audio_f32, language="zh"
+                    )["text"]
+
+            return _OpenAIWhisperWrap(m)
+
         except Exception as e:
-            log.error("[MIC] Whisper 載入失敗：%s", e)
+            log.error("[MIC] 所有 Whisper 後端載入失敗：%s", e)
             return None
 
     def _run(self):
@@ -675,7 +701,7 @@ def main():
     p.add_argument("--ws-url",       default="ws://127.0.0.1:8765/ws/viewer",
                    help="WebSocket URL（--source ws 時使用）")
     p.add_argument("--webcam-index", type=int, default=0)
-    p.add_argument("--yolo-weights", default="yolov8n.pt")
+    p.add_argument("--yolo-weights", default="yolov8s.pt")
     p.add_argument("--yolo-device",  default="cpu")
     p.add_argument("--yolo-conf",    type=float, default=0.35)
     p.add_argument("--tts",          choices=["local", "print"], default="print",
@@ -733,7 +759,7 @@ def main():
     # ── 建立視窗（與 aiglass2 相同）──────────
     WIN = "Find & Grab — aiglass3  (q 離開)"
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 800, 600)
+    cv2.resizeWindow(WIN, 1200, 720)
 
     log.info("[READY] 尋物視窗已就緒，等待指令")
     tts_fn("尋物模式已啟動，請按鍵選擇目標或說出指令。")
@@ -751,7 +777,7 @@ def main():
                 cv2.waitKey(1)
                 continue
 
-            frame = cv2.flip(frame, 1)
+            #frame = cv2.flip(frame, 1)
             frame = np.ascontiguousarray(frame)
 
             run_hands = (fsm.state == FIState.GUIDING_HAND)

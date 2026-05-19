@@ -11,3 +11,5 @@ runs/
 static/models/
 videos/
 *.mp4
+recordings/
+*.wav

@@ -1,6 +1,7 @@
 # app_main.py
 # -*- coding: utf-8 -*-
 # 導入我們剛寫好的語音引擎
+#python find_item_window.py --source ws --tts local --mic
 from api.voice_engine import recognize_audio_from_file, text_to_speech_file
 from asr_core import process_voice_file_to_ai  # 這是剛才在 asr_core 新增的函數
 import os, sys, time, json, asyncio, base64, audioop
@@ -259,6 +260,22 @@ async def full_system_reset(reason: str = ""):
     except Exception:
         pass
     print("[SYSTEM] full reset done.", flush=True)
+_find_window_fsm = None  # find_item_window.py 啟動後會注入
+
+def register_find_window_fsm(fsm):
+    """讓 find_item_window.py 在啟動時把 FSM 物件注入到 app_main"""
+    global _find_window_fsm
+    _find_window_fsm = fsm
+    print("[APP_MAIN] find_item_window FSM 已注冊", flush=True)
+
+def _notify_find_window(zh: str, en: str):
+    global _find_window_fsm
+    if _find_window_fsm is not None:
+        try:
+            _find_window_fsm.set_target(zh, en)
+            print(f"[APP_MAIN] 已通知 find_window FSM：{zh} ({en})", flush=True)
+        except Exception as e:
+            print(f"[APP_MAIN] 通知 find_window FSM 失敗：{e}", flush=True)
 
 def start_yolomedia_with_target(target_name: str):
     global yolomedia_thread, yolomedia_stop_event, yolomedia_running, yolomedia_sending_frames
@@ -366,27 +383,16 @@ async def start_ai_with_text_custom(user_text: str):
         match = re.search(find_pattern, user_text)
         item_cn = match.group(1).strip() if match else "物品"
         label_en, src = extract_english_label(item_cn)
-<<<<<<< HEAD
-        if orchestrator: orchestrator.start_item_search()
-        start_yolomedia_with_target(label_en)
-=======
-        
-        if orchestrator: 
-            # 💡 理由：喚醒總導航器的 ITEM_SEARCH 狀態，讓後端接管所有運算
+
+        # 通知 find_item_window.py 的 FSM
+        _notify_find_window(item_cn, label_en)
+
+        if orchestrator:
             orchestrator.start_item_search()
-            if hasattr(orchestrator, 'find') and orchestrator.find:
-                orchestrator.find.set_target(label_en)
-                
->>>>>>> feature/find-object-wip
+        start_yolomedia_with_target(label_en)
+
         await ui_broadcast_final(f"[找物品] 正在尋找 {item_cn}...")
         play_voice_text(f"正在尋找 {item_cn}。")
-        return
-    if "找到了" in user_text or "拿到了" in user_text:
-        stop_yolomedia()
-        if orchestrator:
-            orchestrator.stop_item_search(restore_nav=True)
-            await ui_broadcast_final("[找物品] 已找到物品，繼續導航。")
-            play_voice_text("已找到物品，繼續導航。")
         return
     print(f"[OMNI] 未知指令，已攔截: {user_text}")
     await ui_broadcast_final(f"[系统] 未知指令: {user_text}")
