@@ -3,7 +3,13 @@ from pathlib import Path
 
 import numpy as np
 
-from edge.config import STT_COMPUTE_TYPE, STT_DEVICE, STT_LANGUAGE, STT_MODEL
+from edge.config import (
+    STT_COMPUTE_TYPE,
+    STT_CPU_THREADS,
+    STT_DEVICE,
+    STT_LANGUAGE,
+    STT_MODEL,
+)
 
 log = logging.getLogger(__name__)
 
@@ -20,11 +26,16 @@ class WhisperSTT:
         device: str = STT_DEVICE,
         compute_type: str = STT_COMPUTE_TYPE,
         language: str = STT_LANGUAGE,
+        cpu_threads: int = STT_CPU_THREADS,
     ):
         from faster_whisper import WhisperModel
 
-        log.info("Loading faster-whisper model=%s device=%s", model_size, device)
-        self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        log.info("Loading faster-whisper model=%s device=%s threads=%s",
+                 model_size, device, cpu_threads)
+        self.model = WhisperModel(
+            model_size, device=device, compute_type=compute_type,
+            cpu_threads=cpu_threads,
+        )
         self.language = language
 
     def transcribe(self, pcm_f32_16k: np.ndarray) -> str:

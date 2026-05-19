@@ -110,5 +110,24 @@ class AudioRingBuffer:
         self._buf.clear()
         return data
 
+    def drain_all(self, max_seconds: float) -> np.ndarray:
+        """Take every sample currently buffered, capped at the most recent
+        `max_seconds`. Returns empty array if the buffer is empty.
+
+        Used when we want to avoid losing speech that arrived while the
+        previous STT call was still running, but also don't want to feed
+        whisper an ever-growing chunk if it falls behind realtime.
+        """
+        n = len(self._buf)
+        if n == 0:
+            return np.empty(0, dtype=np.float32)
+        cap = int(self.sample_rate * max_seconds)
+        if n > cap:
+            data = np.array(list(self._buf)[-cap:], dtype=np.float32)
+        else:
+            data = np.array(list(self._buf), dtype=np.float32)
+        self._buf.clear()
+        return data
+
     def __len__(self) -> int:
         return len(self._buf)

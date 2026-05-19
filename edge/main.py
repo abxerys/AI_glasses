@@ -14,6 +14,7 @@ from edge.config import (
     SEGMENTATION_WEIGHTS,
     SHOPPING_WEIGHTS,
     STT_CHUNK_SECONDS,
+    STT_MAX_DRAIN_SECONDS,
     TRAFFIC_LIGHT_WEIGHTS,
     WS_HOST,
     WS_PORT,
@@ -80,10 +81,18 @@ def _load_item_detectors() -> ItemDetectorSet:
 
 async def _stt_loop(stt: WhisperSTT, audio_buf: AudioRingBuffer,
                     state_machine: StateMachine) -> None:
+    """Run STT once per STT_CHUNK_SECONDS.
+
+    Each tick drains EVERY buffered sample (capped at the most recent
+    STT_MAX_DRAIN_SECONDS) and feeds it to whisper. This preserves speech
+    that crosses chunk boundaries — a fixed-window 1.5 s slice was chopping
+    the last syllable off short Chinese commands like "找水壺" → "找水".
+    """
+    min_samples = int(0.4 * 16000)  # skip if less than 0.4 s of audio
     while True:
         await asyncio.sleep(STT_CHUNK_SECONDS)
-        pcm = audio_buf.drain_seconds(STT_CHUNK_SECONDS)
-        if pcm.size == 0:
+        pcm = audio_buf.drain_all(STT_MAX_DRAIN_SECONDS)
+        if pcm.size < min_samples:
             continue
         try:
             text = await asyncio.to_thread(stt.transcribe, pcm)

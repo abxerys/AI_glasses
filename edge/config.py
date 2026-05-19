@@ -17,16 +17,25 @@ YOLO_IMGSZ = 640
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
 
-STT_MODEL = "small"
+STT_MODEL = "base"
 STT_LANGUAGE = "zh"
 # Force CPU. "auto" picks CUDA when torch is built with CUDA support, even on
 # machines without the matching cuBLAS DLLs, which then crashes at first
-# inference. CPU + int8 runs at ~0.5–1 s per 1.5 s chunk on modern laptops,
-# which is fine for this demo. Switch to "cuda" only if you've verified the
-# CUDA toolkit is installed and cublas64_12.dll resolves on PATH.
+# inference. Switch to "cuda" only if you've verified the CUDA toolkit is
+# installed and cublas64_12.dll resolves on PATH.
 STT_DEVICE = "cpu"
 STT_COMPUTE_TYPE = "int8"
-STT_CHUNK_SECONDS = 1.5
+# 0 means "use all available CPU cores" for the ctranslate2 backend. faster-
+# whisper's default of 4 leaves cores idle on most laptops.
+STT_CPU_THREADS = 0
+# How often we run STT. A short Mandarin command like "找水壺" is ~1 s; 3 s
+# of audio gives whisper enough context to not chop off the last syllable.
+STT_CHUNK_SECONDS = 3.0
+# Hard cap on how much audio is sent to a single transcribe() call. If
+# whisper is slower than realtime and audio backs up, this prevents the
+# chunk from growing without bound (which would feed back into ever slower
+# transcribes).
+STT_MAX_DRAIN_SECONDS = 6.0
 
 TTS_VOICE = "zh-TW-HsiaoChenNeural"
 TTS_RATE = "+0%"
