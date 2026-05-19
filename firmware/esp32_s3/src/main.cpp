@@ -59,6 +59,12 @@ void setup() {
 
   connectWifi();
 
+  Serial.printf("[edge] connecting ws://%s:%d/ws/video\n", EDGE_HOST, EDGE_PORT);
+  Serial.println("[edge] if this hangs, check:");
+  Serial.println("       1. python -m edge.main is running on the PC");
+  Serial.println("       2. EDGE_HOST in wifi_config.h matches PC's LAN IPv4");
+  Serial.println("       3. Windows Defender Firewall allows inbound TCP 8765");
+
   gVideoWs.begin(EDGE_HOST, EDGE_PORT, "/ws/video");
   gVideoWs.onEvent(onVideoEvent);
   gVideoWs.setReconnectInterval(2000);
