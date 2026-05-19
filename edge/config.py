@@ -17,6 +17,12 @@ YOLO_IMGSZ = 640
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
 
+# Sample rate the ESP32 (and fake_esp32.py) plays on its I2S speaker.
+# The server decodes edge-tts MP3 + pre-recorded WAV down to PCM16 mono at
+# this rate before sending to /ws/audio_out, so the ESP32 firmware only
+# needs an I2S writer, no MP3 decoder.
+AUDIO_OUT_SAMPLE_RATE = 16000
+
 STT_MODEL = "base"
 STT_LANGUAGE = "zh"
 # Force CPU. "auto" picks CUDA when torch is built with CUDA support, even on

@@ -2,9 +2,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from edge.audio.codec import to_pcm16_mono
 from edge.audio.throttle import TTSThrottler
 from edge.audio.tts import synthesize
 from edge.audio.voice_assets import VoiceAssets
+from edge.config import AUDIO_OUT_SAMPLE_RATE
 
 log = logging.getLogger(__name__)
 
@@ -90,11 +92,17 @@ class Speaker:
     async def _materialize(self, u: _Utterance) -> bytes | None:
         if u.key is not None and self._assets is not None and self._assets.has(u.key):
             log.info("voice asset: %s", u.key)
-            return self._assets.get_bytes(u.key)
+            raw = self._assets.get_bytes(u.key)
+        else:
+            text = u.text if u.text is not None else u.fallback
+            if not text:
+                log.debug("no asset for key=%s and no fallback text", u.key)
+                return None
+            log.info("TTS: %s", text)
+            raw = await synthesize(text)
 
-        text = u.text if u.text is not None else u.fallback
-        if not text:
-            log.debug("no asset for key=%s and no fallback text", u.key)
+        if not raw:
             return None
-        log.info("TTS: %s", text)
-        return await synthesize(text)
+        # Decode + resample to a fixed PCM16 mono format so both fake_esp32.py
+        # and the real ESP32 firmware can consume the stream identically.
+        return await asyncio.to_thread(to_pcm16_mono, raw, AUDIO_OUT_SAMPLE_RATE)

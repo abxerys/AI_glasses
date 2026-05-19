@@ -89,6 +89,7 @@ for _en, _zh in COCO_ZH.items():
     ZH_TO_COCO[_zh] = _en
 
 _ZH_ALIAS = {
+    # Traditional Chinese (primary; zh-TW)
     "手機": "cell phone",
     "電話": "cell phone",
     "行動電話": "cell phone",
@@ -114,6 +115,18 @@ _ZH_ALIAS = {
     "椅子": "chair",
     "盆栽": "potted plant",
     "花": "potted plant",
+    # Simplified Chinese — covers cases where zhconv isn't installed or
+    # Whisper outputs simplified for variants that weren't converted.
+    "手机": "cell phone",
+    "电话": "cell phone",
+    "钥匙": "backpack",
+    "电脑": "laptop",
+    "笔电": "laptop",
+    "电视": "tv",
+    "遥控": "remote",
+    "遥控器": "remote",
+    "书本": "book",
+    "盆栽": "potted plant",
     # ── shoppingbest5.pt custom items ──
     "AD鈣奶": "AD_milk",
     "AD钙奶": "AD_milk",

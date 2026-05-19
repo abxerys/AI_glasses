@@ -3,6 +3,12 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import zhconv
+    _HAS_ZHCONV = True
+except ImportError:
+    _HAS_ZHCONV = False
+
 from edge.config import (
     STT_COMPUTE_TYPE,
     STT_CPU_THREADS,
@@ -61,7 +67,15 @@ class WhisperSTT:
             # vad_filter disabled — it was eating every short chunk. Our RMS
             # gate above already prevents transcription on pure silence.
         )
-        return "".join(seg.text for seg in segments).strip()
+        text = "".join(seg.text for seg in segments).strip()
+
+        # Whisper's Chinese output mixes simplified and traditional; users
+        # speak zh-TW and our alias tables only contain traditional, so
+        # normalise to Traditional Chinese here.
+        if text and self.language == "zh" and _HAS_ZHCONV:
+            text = zhconv.convert(text, "zh-tw")
+
+        return text
 
     def transcribe_file(self, path: str | Path) -> str:
         segments, _info = self.model.transcribe(str(path), language=self.language, beam_size=1)

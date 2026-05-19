@@ -7,19 +7,19 @@ Usage:
 Three concurrent WS connections are opened to the edge server:
     /ws/video      send JPEG frames from the webcam
     /ws/audio_in   send PCM16 mono 16kHz from the mic
-    /ws/audio_out  receive MP3 from the server and play through speakers
+    /ws/audio_out  receive PCM16 mono 16kHz from the server and play through speakers
 """
 
 import argparse
 import asyncio
-import io
 import logging
 
 import cv2
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 import websockets
+
+from edge.config import AUDIO_OUT_SAMPLE_RATE
 
 log = logging.getLogger("fake_esp32")
 
@@ -109,19 +109,21 @@ async def stream_audio_in(uri: str) -> None:
         stream.close()
 
 
-async def receive_audio_out(uri: str) -> None:
+async def receive_audio_out(uri: str, sample_rate: int) -> None:
+    """Receive PCM16 mono frames from the server and play them.
+
+    The server (edge/audio/speaker.py) decodes its source audio (MP3 or
+    WAV) to PCM16 at AUDIO_OUT_SAMPLE_RATE before sending, so we don't
+    need any decoder here — just feed sounddevice directly.
+    """
     ws = await _connect_with_retry(uri, "audio_out")
     async with ws:
         async for msg in ws:
             if not isinstance(msg, (bytes, bytearray)):
                 continue
             try:
-                data, sr = sf.read(io.BytesIO(msg), dtype="float32")
-            except Exception:
-                log.exception("decode mp3 failed (need libsndfile with mp3 support)")
-                continue
-            try:
-                sd.play(data, sr, blocking=False)
+                pcm = np.frombuffer(msg, dtype="<i2").astype(np.float32) / 32768.0
+                sd.play(pcm, sample_rate, blocking=False)
             except Exception:
                 log.exception("playback failed")
 
@@ -137,7 +139,7 @@ async def amain(args) -> None:
     if not args.no_audio_in:
         tasks.append(stream_audio_in(f"{base}/ws/audio_in"))
     if not args.no_audio_out:
-        tasks.append(receive_audio_out(f"{base}/ws/audio_out"))
+        tasks.append(receive_audio_out(f"{base}/ws/audio_out", AUDIO_OUT_SAMPLE_RATE))
     if not tasks:
         log.error("nothing to do; remove at least one --no-* flag")
         return

@@ -15,6 +15,7 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 
+#include "audio_io.h"
 #include "camera_stream.h"
 #include "wifi_config.h"
 
@@ -68,6 +69,8 @@ void setup() {
   gVideoWs.begin(EDGE_HOST, EDGE_PORT, "/ws/video");
   gVideoWs.onEvent(onVideoEvent);
   gVideoWs.setReconnectInterval(2000);
+
+  audio_io_begin(EDGE_HOST, EDGE_PORT);
 }
 
 static unsigned long gLastFrameMs = 0;
@@ -75,6 +78,7 @@ static const unsigned long kFramePeriodMs = 100;  // 10 fps
 
 void loop() {
   gVideoWs.loop();
+  audio_io_loop();
 
   unsigned long now = millis();
   if (gVideoConnected && (now - gLastFrameMs) >= kFramePeriodMs) {
