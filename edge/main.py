@@ -21,7 +21,7 @@ from edge.config import (
 from edge.intent import parse as parse_intent
 from edge.server import AudioRingBuffer, StreamHub
 from edge.state_machine import StateMachine
-from edge.vision.detector import Detector
+from edge.vision.detector import Detector, ItemDetectorSet
 
 log = logging.getLogger(__name__)
 
@@ -55,10 +55,27 @@ def _load_hand_tracker():
         return None
 
 
-def _pick_item_detector() -> Detector | None:
+def _load_item_detectors() -> ItemDetectorSet:
+    """Load BOTH the custom shopping model (if present) AND the COCO model.
+
+    The shopping model is consulted first for items it knows about
+    (AD_milk, Red_Bull). COCO covers the long tail of everyday objects
+    (phone, bottle, chair, ...). ultralytics will auto-download yolov8s.pt
+    on first run if the user hasn't placed it in models/.
+    """
+    detectors: list[Detector] = []
     if Path(SHOPPING_WEIGHTS).exists():
-        return _load_detector(SHOPPING_WEIGHTS, "item(shopping)")
-    return _load_detector(COCO_WEIGHTS, "item(COCO)")
+        d = _load_detector(SHOPPING_WEIGHTS, "item(shopping)")
+        if d is not None:
+            detectors.append(d)
+    d = _load_detector(COCO_WEIGHTS, "item(COCO)")
+    if d is not None:
+        detectors.append(d)
+    s = ItemDetectorSet(detectors)
+    if not s.empty:
+        log.info("item detectors total: %d, combined classes: %d",
+                 len(s.detectors), len(s.all_classes()))
+    return s
 
 
 async def _stt_loop(stt: WhisperSTT, audio_buf: AudioRingBuffer,
@@ -97,7 +114,7 @@ async def amain() -> None:
     speaker.set_sink(hub.send_audio_out)
     speaker.start()
 
-    item_det = _pick_item_detector()
+    item_dets = _load_item_detectors()
     tl_det = _load_detector(TRAFFIC_LIGHT_WEIGHTS, "traffic_light")
     # One seg model covers both crosswalk and tactile-paving (盲道).
     # Each mode filters by class name to extract the slice it needs.
@@ -106,7 +123,7 @@ async def amain() -> None:
 
     sm = StateMachine(
         video_q=video_q, speaker=speaker,
-        item_detector=item_det,
+        item_detectors=item_dets,
         traffic_light_detector=tl_det,
         seg_detector=seg_det,
         hand_tracker=hand,

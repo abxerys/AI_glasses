@@ -17,13 +17,13 @@ class StateMachine:
     """
 
     def __init__(self, video_q: asyncio.Queue, speaker: Speaker, *,
-                 item_detector=None,
+                 item_detectors=None,
                  traffic_light_detector=None,
                  seg_detector=None,
                  hand_tracker=None):
         self.video_q = video_q
         self.speaker = speaker
-        self.item_detector = item_detector
+        self.item_detectors = item_detectors
         self.traffic_light_detector = traffic_light_detector
         self.seg_detector = seg_detector
         self.hand_tracker = hand_tracker
@@ -42,15 +42,22 @@ class StateMachine:
             return
 
         if intent.name == "voice_search":
-            if self.item_detector is None:
+            if self.item_detectors is None or self.item_detectors.empty:
                 self.speaker.say_key("no_item_model", fallback="物品辨識模型尚未載入")
+                return
+            detector = self.item_detectors.for_class(intent.target)
+            if detector is None:
+                log.info("no detector knows class %r; available=%s",
+                         intent.target, sorted(self.item_detectors.all_classes()))
+                self.speaker.say_key("target_unsupported",
+                                     fallback="目前模型沒有這個物品")
                 return
             await self._stop_active(None, None)
             await self._start("voice_search", voice_search.run(
                 target=intent.target,
                 video_q=self.video_q,
                 speaker=self.speaker,
-                detector=self.item_detector,
+                detector=detector,
                 hand_tracker=self.hand_tracker,
                 cancel=self._new_cancel(),
             ))

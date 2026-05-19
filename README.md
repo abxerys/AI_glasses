@@ -60,11 +60,14 @@ Windows / macOS 不會遇到這問題。
 
 | 檔名 | 用途 | 必要性 |
 |---|---|---|
-| `shoppingbest5.pt` | 物品辨識（**目前只含 `AD鈣奶`、`紅牛` 兩類**） | ✅ 語音搜尋必須 |
+| `shoppingbest5.pt` | 自訂飲料（`AD鈣奶`、`紅牛`） | 🟡 想搜尋這兩種飲料時要 |
 | `trafficlight.pt` | 紅綠燈狀態 | ✅ 過街必須 |
 | `yolo-seg.pt` | 斑馬線 + 盲道分割（同一個檔同時服務兩個模式） | ✅ 過街 / 盲道導航必須 |
 | `hand_landmarker.task` | MediaPipe 手部關鍵點 | ✅ 語音搜尋第二階段「手部對焦」 |
-| `yolov8s.pt` | COCO 80 類（備援） | 🟡 沒有 `shoppingbest5.pt` 時自動使用 |
+| `yolov8s.pt` | COCO 80 類通用物品（手機、瓶子、椅子…） | 🟢 自動下載，不必手動放 |
+
+語音搜尋會**同時**掛載 `shoppingbest5.pt` 與 `yolov8s.pt`，依目標物自動分流：
+「找紅牛」走 shopping、「找手機」「找水壺」「找椅子」走 COCO。
 
 **不需要上傳**：`yoloe-11l-seg.pt`（開放詞彙，留待後續進階功能）。
 

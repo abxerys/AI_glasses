@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -5,6 +6,18 @@ import numpy as np
 
 from edge.config import YOLO_CONF, YOLO_IMGSZ
 from edge.vision.geometry import BBox
+
+log = logging.getLogger(__name__)
+
+# Stock model names that ultralytics can download on demand. If the user
+# hasn't placed the file in models/ yet, we let YOLO() resolve by name and
+# auto-download to its own cache. Custom-trained .pt files must still be
+# placed at the configured path.
+_AUTO_DOWNLOAD_NAMES = {
+    "yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+    "yolov8n-seg.pt", "yolov8s-seg.pt", "yolov8m-seg.pt",
+    "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt",
+}
 
 
 @dataclass(frozen=True)
@@ -22,13 +35,19 @@ class Detector:
     def __init__(self, weights: str | Path, conf: float = YOLO_CONF):
         from ultralytics import YOLO
 
-        weights = str(weights)
-        if not Path(weights).exists():
+        weights_str = str(weights)
+        weights_path = Path(weights_str)
+        if weights_path.exists():
+            self.model = YOLO(weights_str)
+        elif weights_path.name in _AUTO_DOWNLOAD_NAMES:
+            log.info("Local %s not found; ultralytics will auto-download",
+                     weights_path.name)
+            self.model = YOLO(weights_path.name)
+        else:
             raise FileNotFoundError(
-                f"YOLO weights not found at {weights}. "
+                f"YOLO weights not found at {weights_str}. "
                 "See models/README.md for how to obtain it."
             )
-        self.model = YOLO(weights)
         self.conf = conf
         self.names: dict[int, str] = self.model.names
 
@@ -78,3 +97,29 @@ def pick_largest(dets: list[Detection], *, class_name: str | None = None,
     if not candidates:
         return None
     return max(candidates, key=lambda d: d.bbox.w * d.bbox.h)
+
+
+class ItemDetectorSet:
+    """A bundle of item-detection models (e.g. shopping + COCO) routed by
+    class name. Earlier entries win on ties, so the custom shopping model is
+    consulted before the generic COCO fallback.
+    """
+
+    def __init__(self, detectors: list["Detector"]):
+        self.detectors: list["Detector"] = [d for d in detectors if d is not None]
+
+    @property
+    def empty(self) -> bool:
+        return not self.detectors
+
+    def for_class(self, name: str) -> "Detector | None":
+        for d in self.detectors:
+            if name in d.names.values():
+                return d
+        return None
+
+    def all_classes(self) -> set[str]:
+        out: set[str] = set()
+        for d in self.detectors:
+            out.update(d.names.values())
+        return out
