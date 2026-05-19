@@ -63,6 +63,7 @@ cv2.setNumThreads(1)
 import argparse
 import asyncio
 import logging
+import re
 import sys
 import threading
 import time
@@ -692,6 +693,40 @@ class _MicListener:
 
 
 # ════════════════════════════════════════════════════════
+#  注冊到 app_main（讓語音呼叫能驅動此 FSM）
+# ════════════════════════════════════════════════════════
+def register_to_app_main(fsm: FindItemFSM) -> bool:
+    """
+    將 fsm 注冊到 app_main._find_window_fsm，
+    使 app_main 的語音路由（FIND_ITEM intent）可以直接呼叫
+    fsm.set_target()，視窗畫面也會即時反應。
+
+    回傳 True 表示注冊成功，False 表示 app_main 不在同一個 Python 程序中。
+    """
+    try:
+        import app_main as _am
+        _am.register_find_window_fsm(fsm)
+        log.info("[REGISTER] FSM 已注冊到 app_main，語音呼叫現已生效")
+        return True
+    except ImportError:
+        log.warning("[REGISTER] 找不到 app_main，跳過注冊（獨立模式）")
+        return False
+    except Exception as e:
+        log.warning("[REGISTER] 注冊失敗：%s", e)
+        return False
+
+
+def unregister_from_app_main() -> None:
+    """視窗關閉時反注冊，避免 app_main 持有懸空指標。"""
+    try:
+        import app_main as _am
+        _am.register_find_window_fsm(None)
+        log.info("[REGISTER] 已從 app_main 反注冊 FSM")
+    except Exception:
+        pass
+
+
+# ════════════════════════════════════════════════════════
 #  主函式
 # ════════════════════════════════════════════════════════
 def main():
@@ -734,6 +769,11 @@ def main():
     detector = YoloDetector(args.yolo_weights, args.yolo_device, args.yolo_conf)
     hands    = HandsDetector(max_num_hands=1)
     fsm      = FindItemFSM(tts_fn=tts_fn)
+
+    # ── ★ 關鍵修復：注冊 FSM 到 app_main ──────
+    # 讓 app_main 的語音路由（FIND_ITEM intent）可以直接呼叫 fsm.set_target()
+    # 不管注冊是否成功，視窗本身都照常運行
+    register_to_app_main(fsm)
 
     # ── 影像來源執行緒 ────────────────────────
     if args.source == "webcam":
@@ -836,6 +876,8 @@ def main():
 
     finally:
         _stop_flag.set()
+        # ── ★ 視窗關閉時反注冊，避免殘留懸空指標 ──
+        unregister_from_app_main()
         if mic:    mic.stop()
         hands.close()
         fsm.close()
