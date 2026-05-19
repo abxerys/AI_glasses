@@ -1,8 +1,11 @@
 #pragma once
 
-#if defined(AIGLS_BOARD_XIAO_S3_SENSE)
+// ─────────────────────────────────────────────────────────────────────
+// XIAO ESP32-S3 family (Sense and non-Sense) — camera FPC connector
+// pinout is identical on both. OV2640 and OV3660 use the same connector.
+// ─────────────────────────────────────────────────────────────────────
+#if defined(AIGLS_BOARD_XIAO_S3)
 
-// Seeed Studio XIAO ESP32S3 Sense (camera on-board OV2640)
 #define PWDN_GPIO_NUM    -1
 #define RESET_GPIO_NUM   -1
 #define XCLK_GPIO_NUM    10
@@ -20,19 +23,31 @@
 #define HREF_GPIO_NUM    47
 #define PCLK_GPIO_NUM    13
 
-// On-board PDM mic on the XIAO Sense
+// On-board PDM mic on the XIAO Sense (only on Sense; ignored on base S3)
 #define I2S_MIC_BCLK     -1
 #define I2S_MIC_WS       42
 #define I2S_MIC_DATA     41
 
-// External I2S DAC / amp (e.g. MAX98357A) - adjust to your wiring
-#define I2S_SPK_BCLK      7
-#define I2S_SPK_LRC       8
-#define I2S_SPK_DIN       9
+// MAX98357A I2S Class-D amp wiring (XIAO ESP32-S3 base).
+// These are the recommended defaults — verify against your actual wiring.
+//
+//   MAX98357A pin  ──→  XIAO pad   GPIO
+//   LRC (WS)            D0         GPIO 1
+//   BCLK                D1         GPIO 2
+//   DIN                 D2         GPIO 3
+//   GAIN                — leave floating (= 9 dB) or tie to GND (= 12 dB)
+//   SD                  — tie to 3V3 (always on) or via a GPIO to mute
+//   VIN                 — 5 V or 3V3
+//   GND                 — GND
+#define I2S_SPK_LRC       1
+#define I2S_SPK_BCLK      2
+#define I2S_SPK_DIN       3
 
+// ─────────────────────────────────────────────────────────────────────
+// ESP32-S3-CAM (Freenove / generic)
+// ─────────────────────────────────────────────────────────────────────
 #elif defined(AIGLS_BOARD_ESP32S3_CAM)
 
-// ESP32-S3-CAM (Freenove / generic) — change to match your board's silkscreen
 #define PWDN_GPIO_NUM    -1
 #define RESET_GPIO_NUM   -1
 #define XCLK_GPIO_NUM    15
@@ -54,8 +69,8 @@
 #define I2S_MIC_WS        2
 #define I2S_MIC_DATA      3
 
-#define I2S_SPK_BCLK     38
-#define I2S_SPK_LRC      39
+#define I2S_SPK_LRC      38
+#define I2S_SPK_BCLK     39
 #define I2S_SPK_DIN      40
 
 #else

@@ -128,12 +128,20 @@ async def receive_audio_out(uri: str) -> None:
 
 async def amain(args) -> None:
     base = f"ws://{args.host}:{args.port}"
-    await asyncio.gather(
-        stream_video(f"{base}/ws/video", args.camera, args.fps,
-                     args.jpeg_quality, args.preview),
-        stream_audio_in(f"{base}/ws/audio_in"),
-        receive_audio_out(f"{base}/ws/audio_out"),
-    )
+    tasks = []
+    if not args.no_video:
+        tasks.append(stream_video(f"{base}/ws/video", args.camera, args.fps,
+                                  args.jpeg_quality, args.preview))
+    else:
+        log.info("video stream disabled (--no-video); expecting real ESP32 camera")
+    if not args.no_audio_in:
+        tasks.append(stream_audio_in(f"{base}/ws/audio_in"))
+    if not args.no_audio_out:
+        tasks.append(receive_audio_out(f"{base}/ws/audio_out"))
+    if not tasks:
+        log.error("nothing to do; remove at least one --no-* flag")
+        return
+    await asyncio.gather(*tasks)
 
 
 def _list_audio_devices() -> None:
@@ -156,6 +164,12 @@ def main() -> None:
                    help="print available audio devices and exit")
     p.add_argument("--mic", type=int, default=None,
                    help="sounddevice input device index (use --list-mics to find)")
+    p.add_argument("--no-video", action="store_true",
+                   help="don't stream laptop webcam (use when real ESP32 sends video)")
+    p.add_argument("--no-audio-in", action="store_true",
+                   help="don't capture laptop mic (use when real ESP32 sends audio)")
+    p.add_argument("--no-audio-out", action="store_true",
+                   help="don't play TTS through laptop speakers")
     args = p.parse_args()
 
     if args.list_mics:

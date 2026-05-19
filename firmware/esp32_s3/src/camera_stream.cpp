@@ -27,7 +27,7 @@ bool camera_begin() {
   cfg.pin_reset    = RESET_GPIO_NUM;
   cfg.xclk_freq_hz = 20000000;
   cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.frame_size   = FRAMESIZE_VGA;
+  cfg.frame_size   = FRAMESIZE_VGA;   // 640x480 — keep YOLO input small + fast
   cfg.jpeg_quality = 12;
   cfg.fb_count     = 2;
   cfg.grab_mode    = CAMERA_GRAB_LATEST;
@@ -38,6 +38,20 @@ bool camera_begin() {
     Serial.printf("camera init failed: 0x%x\n", err);
     return false;
   }
+
+  // OV3660 reports a flipped image relative to OV2640 on the XIAO Sense's
+  // physical orientation. We flip both axes here so the user gets the same
+  // upright frame regardless of which sensor is mounted.
+#if defined(AIGLS_CAMERA_OV3660)
+  sensor_t *s = esp_camera_sensor_get();
+  if (s != nullptr) {
+    s->set_vflip(s, 1);
+    s->set_hmirror(s, 1);
+    s->set_brightness(s, 1);
+    s->set_saturation(s, 0);
+  }
+#endif
+
   return true;
 }
 
