@@ -25,6 +25,7 @@ class StreamHub:
                  audio_in_buffer: "AudioRingBuffer"):
         self.video_q = video_q
         self.audio_in = audio_in_buffer
+        self.latest_frame = None  # most recently-decoded BGR ndarray, for preview
         self._audio_out_ws = None
         self._audio_out_lock = asyncio.Lock()
 
@@ -53,6 +54,7 @@ class StreamHub:
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is None:
                 continue
+            self.latest_frame = frame
             if self.video_q.full():
                 try:
                     self.video_q.get_nowait()

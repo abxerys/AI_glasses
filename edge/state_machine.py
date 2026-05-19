@@ -20,13 +20,15 @@ class StateMachine:
                  item_detectors=None,
                  traffic_light_detector=None,
                  seg_detector=None,
-                 hand_tracker=None):
+                 hand_tracker=None,
+                 preview_bus=None):
         self.video_q = video_q
         self.speaker = speaker
         self.item_detectors = item_detectors
         self.traffic_light_detector = traffic_light_detector
         self.seg_detector = seg_detector
         self.hand_tracker = hand_tracker
+        self.preview_bus = preview_bus
         self._task: asyncio.Task | None = None
         self._cancel: asyncio.Event | None = None
         self._mode: str = "idle"
@@ -60,6 +62,7 @@ class StateMachine:
                 detector=detector,
                 hand_tracker=self.hand_tracker,
                 cancel=self._new_cancel(),
+                preview_bus=self.preview_bus,
             ))
             return
 
@@ -74,6 +77,7 @@ class StateMachine:
                 traffic_light_detector=self.traffic_light_detector,
                 seg_detector=self.seg_detector,
                 cancel=self._new_cancel(),
+                preview_bus=self.preview_bus,
             ))
             return
 
@@ -88,6 +92,7 @@ class StateMachine:
                 speaker=self.speaker,
                 seg_detector=self.seg_detector,
                 cancel=self._new_cancel(),
+                preview_bus=self.preview_bus,
             ))
             return
 

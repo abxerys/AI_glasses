@@ -23,6 +23,12 @@ WS_PORT = 8765
 # needs an I2S writer, no MP3 decoder.
 AUDIO_OUT_SAMPLE_RATE = 16000
 
+# Max payload per /ws/audio_out WebSocket message. The ESP32 WebSocketsClient
+# library rejects frames over ~4 KB (1009 "message too big"). 2048 B = 1024
+# PCM16 samples = 64 ms @ 16 kHz, well under that ceiling, and small enough
+# to keep playback latency low.
+AUDIO_OUT_CHUNK_BYTES = 2048
+
 STT_MODEL = "base"
 STT_LANGUAGE = "zh"
 # Force CPU. "auto" picks CUDA when torch is built with CUDA support, even on

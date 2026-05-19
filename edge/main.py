@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import logging
 from pathlib import Path
@@ -106,7 +107,7 @@ async def _stt_loop(stt: WhisperSTT, audio_buf: AudioRingBuffer,
         await state_machine.handle(intent)
 
 
-async def amain() -> None:
+async def amain(args) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
@@ -130,12 +131,19 @@ async def amain() -> None:
     seg_det = _load_detector(SEGMENTATION_WEIGHTS, "segmentation")
     hand = _load_hand_tracker()
 
+    preview_bus = None
+    if args.preview:
+        from edge.preview import PreviewBus, preview_loop
+        preview_bus = PreviewBus()
+        asyncio.create_task(preview_loop(hub, preview_bus), name="preview")
+
     sm = StateMachine(
         video_q=video_q, speaker=speaker,
         item_detectors=item_dets,
         traffic_light_detector=tl_det,
         seg_detector=seg_det,
         hand_tracker=hand,
+        preview_bus=preview_bus,
     )
 
     stt = WhisperSTT()
@@ -156,8 +164,13 @@ async def amain() -> None:
 
 
 def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--preview", action="store_true",
+                   help="open a cv2 window showing the live ESP32 video feed "
+                        "with detection bboxes overlaid; press 'q' to close")
+    args = p.parse_args()
     try:
-        asyncio.run(amain())
+        asyncio.run(amain(args))
     except KeyboardInterrupt:
         pass
 

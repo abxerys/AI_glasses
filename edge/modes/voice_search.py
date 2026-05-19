@@ -46,7 +46,8 @@ _HEAD_KEYS = {
 async def run(*, target: str, video_q: asyncio.Queue,
               speaker: Speaker, detector: Detector,
               hand_tracker: HandTracker | None,
-              cancel: asyncio.Event) -> str:
+              cancel: asyncio.Event,
+              preview_bus=None) -> str:
     zh = en_to_zh(target)
     speaker.say_key("search_start", fallback=f"開始尋找{zh}")
 
@@ -67,6 +68,8 @@ async def run(*, target: str, video_q: asyncio.Queue,
 
         h, w = frame.shape[:2]
         dets = await asyncio.to_thread(detector.detect, frame)
+        if preview_bus is not None:
+            preview_bus.publish(frame, dets, mode=f"voice_search:{target}")
         target_det = pick_largest(dets, class_name=target)
 
         if target_det is None:
@@ -109,14 +112,15 @@ async def run(*, target: str, video_q: asyncio.Queue,
     return await _hand_align_phase(
         target=target, zh=zh, video_q=video_q,
         speaker=speaker, detector=detector, hand_tracker=hand_tracker,
-        cancel=cancel, deadline=deadline,
+        cancel=cancel, deadline=deadline, preview_bus=preview_bus,
     )
 
 
 async def _hand_align_phase(*, target: str, zh: str,
                              video_q: asyncio.Queue, speaker: Speaker,
                              detector: Detector, hand_tracker: HandTracker,
-                             cancel: asyncio.Event, deadline: float) -> str:
+                             cancel: asyncio.Event, deadline: float,
+                             preview_bus=None) -> str:
     aligned_frames = 0
     last_hand_hint: str | None = None
     no_hand_frames = 0
@@ -136,6 +140,8 @@ async def _hand_align_phase(*, target: str, zh: str,
             asyncio.to_thread(detector.detect, frame),
             asyncio.to_thread(hand_tracker.track, frame),
         )
+        if preview_bus is not None:
+            preview_bus.publish(frame, dets, mode=f"voice_search:{target}+hand")
         target_det = pick_largest(dets, class_name=target)
 
         if target_det is None:

@@ -41,7 +41,8 @@ def _resolve(detector: Detector, aliases: tuple[str, ...]) -> tuple[str, ...]:
 async def run(*, video_q: asyncio.Queue, speaker: Speaker,
               traffic_light_detector: Detector | None,
               seg_detector: Detector | None,
-              cancel: asyncio.Event) -> str:
+              cancel: asyncio.Event,
+              preview_bus=None) -> str:
     """Guide the user across a crosswalk.
 
     Two models cooperate:
@@ -75,6 +76,8 @@ async def run(*, video_q: asyncio.Queue, speaker: Speaker,
         h, w = frame.shape[:2]
         light_dets = traffic_light_detector.detect(frame) if traffic_light_detector else []
         cw_dets = seg_detector.detect(frame) if seg_detector else []
+        if preview_bus is not None:
+            preview_bus.publish(frame, light_dets + cw_dets, mode="crossing")
 
         red = pick_largest(light_dets, class_names=red_classes) if red_classes else None
         green = pick_largest(light_dets, class_names=green_classes) if green_classes else None

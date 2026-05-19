@@ -37,7 +37,8 @@ def _resolve(detector: Detector, aliases: tuple[str, ...]) -> tuple[str, ...]:
 
 async def run(*, video_q: asyncio.Queue, speaker: Speaker,
               seg_detector: Detector | None,
-              cancel: asyncio.Event) -> str:
+              cancel: asyncio.Event,
+              preview_bus=None) -> str:
     if seg_detector is None:
         speaker.say_key("no_blind_path_model", fallback="盲道模型尚未載入")
         return "config_error"
@@ -62,6 +63,8 @@ async def run(*, video_q: asyncio.Queue, speaker: Speaker,
 
         h, w = frame.shape[:2]
         dets = await asyncio.to_thread(seg_detector.detect, frame)
+        if preview_bus is not None:
+            preview_bus.publish(frame, dets, mode="blind_path")
         bp = pick_largest(dets, class_names=bp_classes)
 
         if bp is None:

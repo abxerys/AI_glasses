@@ -6,7 +6,7 @@ from edge.audio.codec import to_pcm16_mono
 from edge.audio.throttle import TTSThrottler
 from edge.audio.tts import synthesize
 from edge.audio.voice_assets import VoiceAssets
-from edge.config import AUDIO_OUT_SAMPLE_RATE
+from edge.config import AUDIO_OUT_CHUNK_BYTES, AUDIO_OUT_SAMPLE_RATE
 
 log = logging.getLogger(__name__)
 
@@ -84,8 +84,12 @@ class Speaker:
             u = await self._queue.get()
             try:
                 audio = await self._materialize(u)
-                if audio and self._sink is not None:
-                    await self._sink(audio)
+                if not audio or self._sink is None:
+                    continue
+                # Chunk PCM frames so each WS binary message fits inside
+                # the ESP32 WebSocketsClient buffer.
+                for i in range(0, len(audio), AUDIO_OUT_CHUNK_BYTES):
+                    await self._sink(audio[i : i + AUDIO_OUT_CHUNK_BYTES])
             except Exception:
                 log.exception("speaker failed on %s", u)
 
