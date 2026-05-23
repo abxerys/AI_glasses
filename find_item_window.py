@@ -62,6 +62,7 @@ cv2.setNumThreads(1)
 
 import argparse
 import asyncio
+import json
 import logging
 import re
 import sys
@@ -112,7 +113,7 @@ class HandResult:
 #  YOLO 偵測器（懶載入）
 # ════════════════════════════════════════════════════════
 class YoloDetector:
-    def __init__(self, weights="yolov8s.pt", device="cpu", conf=0.2):
+    def __init__(self, weights="yolov8n.pt", device="cpu", conf=0.2):
         self.weights = weights
         self.device  = device
         self.conf    = conf
@@ -227,6 +228,7 @@ class FindItemFSM:
         self.state      = FIState.WAITING_FOR_COMMAND
         self.target_zh: Optional[str] = None
         self.target_en: Optional[str] = None
+        self.app_mode  = "IDLE"
         self.streak     = 0
         self.last_obj:  Optional[Detection] = None
         self.last_obj_t = 0.
@@ -237,12 +239,20 @@ class FindItemFSM:
 
     # ── 外部介面 ──────────────────────────────
     def set_target(self, zh: str, en: str):
+        self.app_mode = "FIND_ITEM"
         self.target_zh, self.target_en = zh, en
         self.streak = 0
         self.last_obj = None
         self._t_head = self._t_hand = self._t_search = 0.
         self._goto(FIState.SEARCHING_OBJECT)
         log.info("[FSM] 目標設定：%s (%s)", zh, en)
+
+    def set_app_mode(self, mode: str):
+        self.app_mode = mode or "IDLE"
+        if self.app_mode != "FIND_ITEM":
+            self._reset()
+            self.app_mode = mode or "IDLE"
+        log.info("[FSM] app mode = %s", self.app_mode)
 
     def confirm(self):
         if self.state != FIState.WAITING_FOR_COMMAND:
@@ -474,7 +484,8 @@ def draw_overlay(frame: np.ndarray, fsm: FindItemFSM,
                   (80, 80, 80), 1)
 
     # 頂端狀態列（黑底綠字）
-    banner = (f"STATE: {fsm.state.name}  "
+    banner = (f"APP: {getattr(fsm, 'app_mode', 'IDLE')}  "
+              f"STATE: {fsm.state.name}  "
               f"target: {fsm.target_zh or '-'}  "
               f"streak: {fsm.streak}")
     cv2.rectangle(frame, (0, 0), (w, 24), (0, 0, 0), -1)
@@ -560,6 +571,54 @@ def _ws_producer(url: str):
             except Exception as e:
                 log.warning("[SRC] WebSocket 中斷：%s，3 秒後重試...", e)
                 await asyncio.sleep(3)
+
+    asyncio.run(_loop())
+
+def _control_ws_listener(url: str, fsm: FindItemFSM):
+    """Listen for app_main mode/target commands in a separate process."""
+    if not url or url.strip().lower() in {"none", "off", "false", "0"}:
+        log.info("[CTRL] control WebSocket disabled")
+        return
+    async def _loop():
+        import websockets
+        warned_unavailable = False
+        while not _stop_flag.is_set():
+            try:
+                if not warned_unavailable:
+                    log.info("[CTRL] connecting %s ...", url)
+                async with websockets.connect(
+                    url,
+                    max_size=1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=20,
+                ) as ws:
+                    warned_unavailable = False
+                    log.info("[CTRL] connected: %s", url)
+                    await ws.send(json.dumps({"type": "hello", "client": "find_item_window"}))
+                    async for msg in ws:
+                        if _stop_flag.is_set():
+                            break
+                        if isinstance(msg, (bytes, bytearray)):
+                            continue
+                        try:
+                            data = json.loads(msg)
+                        except Exception:
+                            log.warning("[CTRL] invalid message: %s", msg)
+                            continue
+                        typ = data.get("type")
+                        if typ == "find_target":
+                            zh = str(data.get("zh") or "").strip()
+                            en = str(data.get("en") or "").strip()
+                            if zh and en:
+                                fsm.set_target(zh, en)
+                        elif typ == "mode":
+                            fsm.set_app_mode(str(data.get("mode") or "IDLE"))
+            except Exception as e:
+                if not warned_unavailable:
+                    log.warning("[CTRL] control WebSocket unavailable: %s; retrying in background", e)
+                    log.warning("[CTRL] restart app_main.py after updating it, or run with --control-url none to disable this link")
+                    warned_unavailable = True
+                await asyncio.sleep(10)
 
     asyncio.run(_loop())
 
@@ -704,7 +763,10 @@ def register_to_app_main(fsm: FindItemFSM) -> bool:
     回傳 True 表示注冊成功，False 表示 app_main 不在同一個 Python 程序中。
     """
     try:
-        import app_main as _am
+        _am = sys.modules.get("app_main")
+        if _am is None:
+            log.info("[REGISTER] app_main not loaded in this process; using control WebSocket")
+            return False
         _am.register_find_window_fsm(fsm)
         log.info("[REGISTER] FSM 已注冊到 app_main，語音呼叫現已生效")
         return True
@@ -719,7 +781,9 @@ def register_to_app_main(fsm: FindItemFSM) -> bool:
 def unregister_from_app_main() -> None:
     """視窗關閉時反注冊，避免 app_main 持有懸空指標。"""
     try:
-        import app_main as _am
+        _am = sys.modules.get("app_main")
+        if _am is None:
+            return
         _am.register_find_window_fsm(None)
         log.info("[REGISTER] 已從 app_main 反注冊 FSM")
     except Exception:
@@ -735,8 +799,10 @@ def main():
                    help="影像來源：webcam 或 ws（接 aiglass3 /ws/viewer）")
     p.add_argument("--ws-url",       default="ws://127.0.0.1:8765/ws/viewer",
                    help="WebSocket URL（--source ws 時使用）")
+    p.add_argument("--control-url",  default="ws://127.0.0.1:8765/ws/find_item_control",
+                   help="app_main control WebSocket URL for voice mode/target updates")
     p.add_argument("--webcam-index", type=int, default=0)
-    p.add_argument("--yolo-weights", default="yolov8s.pt")
+    p.add_argument("--yolo-weights", default="yolov8n.pt")
     p.add_argument("--yolo-device",  default="cpu")
     p.add_argument("--yolo-conf",    type=float, default=0.35)
     p.add_argument("--tts",          choices=["local", "print"], default="print",
@@ -774,6 +840,11 @@ def main():
     # 讓 app_main 的語音路由（FIND_ITEM intent）可以直接呼叫 fsm.set_target()
     # 不管注冊是否成功，視窗本身都照常運行
     register_to_app_main(fsm)
+
+    t_ctrl = threading.Thread(target=_control_ws_listener,
+                              args=(args.control_url, fsm),
+                              daemon=True, name="find_item_ctrl")
+    t_ctrl.start()
 
     # ── 影像來源執行緒 ────────────────────────
     if args.source == "webcam":

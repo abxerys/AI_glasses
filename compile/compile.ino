@@ -18,7 +18,7 @@ using namespace websockets;
 // ===== WiFi / Server =====
 const char* WIFI_SSID   = "D-Link_DIR-13";
 const char* WIFI_PASS   = "0918850082";
-const char* SERVER_HOST = "192.168.100.4";
+const char* SERVER_HOST = "192.168.100.2";
 const uint16_t SERVER_PORT = 8765;
 
 static const char* CAM_WS_PATH = "/ws/camera";

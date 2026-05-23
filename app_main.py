@@ -101,6 +101,7 @@ RECENT_MAX = 50
 last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
 
 camera_viewers: Set[WebSocket] = set()
+find_window_control_clients: Set[WebSocket] = set()
 esp32_camera_ws: Optional[WebSocket] = None
 imu_ws_clients: Set[WebSocket] = set()
 esp32_audio_ws: Optional[WebSocket] = None
@@ -260,6 +261,7 @@ async def full_system_reset(reason: str = ""):
     except Exception:
         pass
     print("[SYSTEM] full reset done.", flush=True)
+    
 _find_window_fsm = None  # find_item_window.py 啟動後會注入
 
 def register_find_window_fsm(fsm):
@@ -276,6 +278,49 @@ def _notify_find_window(zh: str, en: str):
             print(f"[APP_MAIN] 已通知 find_window FSM：{zh} ({en})", flush=True)
         except Exception as e:
             print(f"[APP_MAIN] 通知 find_window FSM 失敗：{e}", flush=True)
+            
+async def _broadcast_find_window_command(payload: Dict[str, Any]):
+    if not find_window_control_clients:
+        return
+    msg = json.dumps(payload, ensure_ascii=False)
+    dead = []
+    for ws in list(find_window_control_clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        find_window_control_clients.discard(ws)
+
+def _schedule_find_window_command(payload: Dict[str, Any]):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_broadcast_find_window_command(payload))
+    except RuntimeError:
+        pass
+
+def _notify_find_window_mode(mode: str):
+    global _find_window_fsm
+    if _find_window_fsm is not None:
+        try:
+            if hasattr(_find_window_fsm, "set_app_mode"):
+                _find_window_fsm.set_app_mode(mode)
+            elif mode != "FIND_ITEM" and hasattr(_find_window_fsm, "_reset"):
+                _find_window_fsm._reset()
+        except Exception as e:
+            print(f"[APP_MAIN] find_window mode notify failed: {e}", flush=True)
+    _schedule_find_window_command({"type": "mode", "mode": mode})
+
+def _notify_find_window(zh: str, en: str):
+    global _find_window_fsm
+    if _find_window_fsm is not None:
+        try:
+            if hasattr(_find_window_fsm, "set_app_mode"):
+                _find_window_fsm.set_app_mode("FIND_ITEM")
+            _find_window_fsm.set_target(zh, en)
+        except Exception as e:
+            print(f"[APP_MAIN] find_window target notify failed: {e}", flush=True)
+    _schedule_find_window_command({"type": "find_target", "zh": zh, "en": en})
 
 def start_yolomedia_with_target(target_name: str):
     global yolomedia_thread, yolomedia_stop_event, yolomedia_running, yolomedia_sending_frames
@@ -347,12 +392,14 @@ async def start_ai_with_text_custom(user_text: str):
     intent = await analyze_intent_with_groq(user_text)
     print(f"[LLM ROUTER] 判斷結果: {intent}")
     if "STOP" in intent:
+        _notify_find_window_mode("STOP")
         if orchestrator:
             orchestrator.stop_navigation()
             play_voice_text("導航已停止。")
             await ui_broadcast_final("[系统] 導航已停止")
         return
     if "CROSS_STREET" in intent:
+        _notify_find_window_mode("CROSS_STREET")
         if yolomedia_running: stop_yolomedia()
         if orchestrator:
             orchestrator.start_crossing()
@@ -360,6 +407,7 @@ async def start_ai_with_text_custom(user_text: str):
             await ui_broadcast_final("[系统] 過馬路模式已啟動")
         return
     if "TRAFFIC_LIGHT" in intent:
+        _notify_find_window_mode("TRAFFIC_LIGHT")
         try:
             import trafficlight_detection
             if orchestrator: orchestrator.start_traffic_light_detection()
@@ -372,6 +420,7 @@ async def start_ai_with_text_custom(user_text: str):
             print(f"[TRAFFIC] 啟動失敗: {e}")
         return
     if "BLIND_PATH" in intent:
+        _notify_find_window_mode("BLIND_PATH")
         if yolomedia_running: stop_yolomedia()
         if orchestrator:
             orchestrator.start_blind_path_navigation()
@@ -696,6 +745,22 @@ async def ws_viewer(ws: WebSocket):
         try: camera_viewers.remove(ws)
         except Exception: pass
         print(f"[VIEWER] Removed. Total viewers: {len(camera_viewers)}", flush=True)
+
+@app.websocket("/ws/find_item_control")
+async def ws_find_item_control(ws: WebSocket):
+    await ws.accept()
+    find_window_control_clients.add(ws)
+    print(f"[FIND_WINDOW] Control connected. Total: {len(find_window_control_clients)}", flush=True)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        find_window_control_clients.discard(ws)
+        print(f"[FIND_WINDOW] Control removed. Total: {len(find_window_control_clients)}", flush=True)
 
 @app.websocket("/ws")
 async def ws_imu(ws: WebSocket):

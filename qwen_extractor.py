@@ -17,6 +17,31 @@ LOCAL_CN2EN = {
     "雪碧": "sprite",
 }
 
+LOCAL_CN2EN.update({
+    "紅牛": "Red_Bull",
+    "红牛": "Red_Bull",
+    "AD牛奶": "AD_milk",
+    "ad牛奶": "AD_milk",
+    "牛奶": "AD_milk",
+    "水壺": "bottle",
+    "水壶": "bottle",
+    "瓶子": "bottle",
+    "手機": "cell phone",
+    "手机": "cell phone",
+    "筆電": "laptop",
+    "笔电": "laptop",
+    "筆記型電腦": "laptop",
+    "笔记本电脑": "laptop",
+    "杯子": "cup",
+    "碗": "bowl",
+    "書": "book",
+    "书": "book",
+    "鍵盤": "keyboard",
+    "键盘": "keyboard",
+    "滑鼠": "mouse",
+    "鼠标": "mouse",
+})
+
 def _make_client() -> OpenAI:
     # 复用你百炼兼容端点；支持从环境变量读取
     base_url = os.getenv("DASHSCOPE_COMPAT_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1")
