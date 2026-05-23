@@ -9,8 +9,10 @@
   ws       接收 aiglass3 app_main.py 的 /ws/viewer 廣播影像
 
 TTS 選項（--tts）：
-  local    呼叫 aiglass3 的 play_voice_text()（須與 app_main.py 共用環境）
-  print    只印到 terminal，不播音（預設，不依賴其他模組）
+  pc       直接用 PC 喇叭播音（pygame+gTTS 或 pyttsx3，預設）
+           ★ 不依賴 ESP32 / app_main.py / broadcast_pcm16_realtime
+  local    呼叫 aiglass3 的 play_voice_text()（須與 app_main.py 共用環境＋ ESP32 連線）
+  print    只印到 terminal，不播音
 
 快捷鍵（視窗內按）：
   q / ESC  關閉
@@ -26,17 +28,20 @@ TTS 選項（--tts）：
   7        滑鼠 / mouse
 
 啟動範例：
-  # 使用本機 Webcam，純 terminal 語音提示
+  # 使用本機 Webcam + PC 喇叭語音（預設，直接執行即可）
   python find_item_window.py
 
-  # 使用本機 Webcam + aiglass3 TTS（需與 app_main.py 共用 Python 環境）
+  # 使用本機 Webcam + ESP32 TTS（需與 app_main.py 共用 Python 環境且 ESP32 已連線）
   python find_item_window.py --tts local
 
   # 接收 aiglass3 app_main.py 廣播的 ESP32 影像
-  python find_item_window.py --source ws --ws-url ws://127.0.0.1:8765/ws/viewer --tts local
+  python find_item_window.py --source ws --ws-url ws://127.0.0.1:8765/ws/viewer
 
   # 接收 ESP32 影像 + PC 麥克風語音辨識
-  python find_item_window.py --source ws --ws-url ws://127.0.0.1:8765/ws/viewer --tts local --mic
+  python find_item_window.py --source ws --ws-url ws://127.0.0.1:8765/ws/viewer --mic
+
+  # 使用較精準的 yolov8s 模型（cell phone 辨識更準）
+  python find_item_window.py --yolo-weights yolov8s.pt
 """
 from __future__ import annotations
 
@@ -113,7 +118,7 @@ class HandResult:
 #  YOLO 偵測器（懶載入）
 # ════════════════════════════════════════════════════════
 class YoloDetector:
-    def __init__(self, weights="yolov8n.pt", device="cpu", conf=0.2):
+    def __init__(self, weights="yolov8s.pt", device="cpu", conf=0.45):
         self.weights = weights
         self.device  = device
         self.conf    = conf
@@ -624,6 +629,111 @@ def _control_ws_listener(url: str, fsm: FindItemFSM):
 
 
 # ════════════════════════════════════════════════════════
+#  PC 本地喇叭 TTS（★ 修復重點：不走 ESP32 / broadcast_pcm16_realtime）
+#
+#  broadcast_pcm16_realtime() 只廣播給 stream_clients（ESP32 /stream.wav 連線），
+#  獨立執行時 stream_clients 是空的 set，PCM 直接被丟棄，PC 喇叭完全無聲。
+#  此函式改用 pygame 直接播放 MP3 到 PC 預設音訊裝置，完全不依賴 ESP32。
+# ════════════════════════════════════════════════════════
+def _make_pc_tts_fn() -> Callable[[str], None]:
+    """
+    建立 PC 喇叭 TTS 函式。
+    優先：pygame + gTTS（gTTS 需要網路）
+    退回：pyttsx3（純離線，不需網路）
+    再退回：print（不依賴任何額外套件）
+
+    各方案 cooldown 為 4 秒（與 FindItemFSM 計時器對齊，避免同一句話被截斷重疊）。
+    """
+    _PC_COOLDOWN = 4.0
+    _lock        = threading.Lock()
+    _last_text   = [""]       # 用 list 讓 closure 可寫入
+    _last_time   = [0.0]
+
+    # ── 嘗試 pygame + gTTS ──────────────────────────────────
+    try:
+        import pygame
+        import pygame.mixer
+        pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+        from gtts import gTTS
+        import tempfile
+
+        def _pygame_tts(text: str):
+            now = time.time()
+            with _lock:
+                if text == _last_text[0] and now - _last_time[0] < _PC_COOLDOWN:
+                    return
+                _last_text[0] = text
+                _last_time[0] = now
+
+            def _play():
+                try:
+                    fd, mp3_path = tempfile.mkstemp(suffix=".mp3")
+                    os.close(fd)
+                    gTTS(text=text, lang="zh-tw").save(mp3_path)
+                    # 每次使用獨立 mixer channel 避免搶鎖
+                    sound = pygame.mixer.Sound(mp3_path)
+                    channel = sound.play()
+                    while channel and channel.get_busy():
+                        time.sleep(0.05)
+                    try:
+                        os.remove(mp3_path)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log.warning("[TTS-PC] pygame 播放失敗：%s", e)
+
+            threading.Thread(target=_play, daemon=True, name="pc_tts").start()
+
+        log.info("[TTS-PC] 使用 pygame + gTTS（PC 喇叭，需要網路）")
+        return _pygame_tts
+
+    except ImportError:
+        log.warning("[TTS-PC] pygame 未安裝，嘗試 pyttsx3...")
+    except Exception as e:
+        log.warning("[TTS-PC] pygame 初始化失敗：%s，嘗試 pyttsx3...", e)
+
+    # ── 退回 pyttsx3（純離線）──────────────────────────────
+    try:
+        import pyttsx3
+        _engine = pyttsx3.init()
+        _engine.setProperty("rate", 200)
+        _engine_lock = threading.Lock()
+
+        def _pyttsx3_tts(text: str):
+            now = time.time()
+            with _lock:
+                if text == _last_text[0] and now - _last_time[0] < _PC_COOLDOWN:
+                    return
+                _last_text[0] = text
+                _last_time[0] = now
+
+            def _play():
+                with _engine_lock:
+                    try:
+                        _engine.say(text)
+                        _engine.runAndWait()
+                    except Exception as e:
+                        log.warning("[TTS-PC] pyttsx3 失敗：%s", e)
+
+            threading.Thread(target=_play, daemon=True, name="pc_tts").start()
+
+        log.info("[TTS-PC] 使用 pyttsx3（離線，PC 喇叭）")
+        return _pyttsx3_tts
+
+    except ImportError:
+        pass
+    except Exception as e:
+        log.warning("[TTS-PC] pyttsx3 初始化失敗：%s", e)
+
+    # ── 最終退回：print ──────────────────────────────────────
+    log.warning(
+        "[TTS-PC] 沒有可用的 PC TTS 後端，退回 print。\n"
+        "  若要有聲音，請安裝：pip install pygame gtts  或  pip install pyttsx3"
+    )
+    return lambda t: print(f"[TTS] {t}", flush=True)
+
+
+# ════════════════════════════════════════════════════════
 #  麥克風 VAD（精簡版 MicListener）
 # ════════════════════════════════════════════════════════
 class _MicListener:
@@ -802,11 +912,18 @@ def main():
     p.add_argument("--control-url",  default="ws://127.0.0.1:8765/ws/find_item_control",
                    help="app_main control WebSocket URL for voice mode/target updates")
     p.add_argument("--webcam-index", type=int, default=0)
-    p.add_argument("--yolo-weights", default="yolov8n.pt")
+    p.add_argument("--yolo-weights", default="yolov8s.pt",
+                   help="YOLO 權重檔案（yolov8s.pt 對 cell phone 辨識更準；yolov8n.pt 速度較快）")
     p.add_argument("--yolo-device",  default="cpu")
-    p.add_argument("--yolo-conf",    type=float, default=0.35)
-    p.add_argument("--tts",          choices=["local", "print"], default="print",
-                   help="TTS 後端：local = aiglass3 play_voice_text；print = 只印 terminal")
+    p.add_argument("--yolo-conf",    type=float, default=0.45,
+                   help="YOLO 信心閾值（預設 0.45；0.35 太低容易把手機誤判為 suitcase）")
+    p.add_argument("--tts",          choices=["pc", "local", "print"], default="pc",
+                   help=(
+                       "TTS 後端："
+                       "pc = 直接播 PC 喇叭（pygame+gTTS 或 pyttsx3，預設）；"
+                       "local = aiglass3 play_voice_text（需 ESP32 連線）；"
+                       "print = 只印 terminal"
+                   ))
     p.add_argument("--mic",          action="store_true",
                    help="啟用 PC 麥克風語音辨識")
     p.add_argument("--stt-model",    default="tiny")
@@ -818,17 +935,24 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # ── TTS 後端 ──────────────────────────────
-    if args.tts == "local":
+    # ── TTS 後端 ──────────────────────────────────────────
+    # ★ 修復說明：
+    #   舊的 --tts local 最終走 broadcast_pcm16_realtime()，
+    #   而 audio_stream.py 裡的 stream_clients 只有 ESP32 連上 /stream.wav 才有成員。
+    #   獨立執行時 stream_clients 是空 set，PCM 直接被丟棄，PC 喇叭完全無聲。
+    #   新增的 --tts pc 改用 pygame 直接播放到 PC 預設音訊裝置，完全不走 ESP32。
+    if args.tts == "pc":
+        tts_fn = _make_pc_tts_fn()
+    elif args.tts == "local":
         try:
             from audio_player import play_voice_text, initialize_audio_system
             initialize_audio_system()
             tts_fn = play_voice_text
-            log.info("[TTS] 使用 aiglass3 play_voice_text")
+            log.info("[TTS] 使用 aiglass3 play_voice_text（注意：需要 ESP32 連線才能出聲）")
         except ImportError:
-            log.warning("[TTS] 無法匯入 audio_player，改用 print 模式")
-            tts_fn = lambda t: print(f"[TTS] {t}", flush=True)
-    else:
+            log.warning("[TTS] 無法匯入 audio_player，改用 pc 模式")
+            tts_fn = _make_pc_tts_fn()
+    else:  # print
         tts_fn = lambda t: print(f"[TTS] {t}", flush=True)
 
     # ── 初始化偵測器與狀態機 ──────────────────
@@ -888,7 +1012,7 @@ def main():
                 cv2.waitKey(1)
                 continue
 
-            #frame = cv2.flip(frame, 1)
+            #frame = cv2.flip(frame, 1)  # webcam 水平翻轉（預設關閉，翻轉會加重誤判）
             frame = np.ascontiguousarray(frame)
 
             run_hands = (fsm.state == FIState.GUIDING_HAND)
