@@ -31,6 +31,9 @@ TTS 選項（--tts）：
 
   # PC 喇叭測試模式（不需要 app_main.py）
   python find_item_window.py --tts pc
+
+  #esp32麥克風
+  python find_item_window.py --source ws --tts relay
 """
 from __future__ import annotations
 
@@ -105,7 +108,7 @@ class HandResult:
 #  YOLO 偵測器
 # ════════════════════════════════════════════════════════
 class YoloDetector:
-    def __init__(self, weights="yolov8s.pt", device="cpu", conf=0.45):
+    def __init__(self, weights="yolov8s.pt", device="cpu", conf=0.5):
         self.weights = weights
         self.device  = device
         self.conf    = conf
@@ -247,6 +250,7 @@ class FindItemFSM:
         if self.state != FIState.WAITING_FOR_COMMAND:
             self._say(f"好的，已確認取得{self.target_zh or '物品'}！")
             self._reset()
+            _send_control_message({"type": "finish_item"})
 
     def on_speech(self, text: str):
         self.last_stt   = text
@@ -262,6 +266,7 @@ class FindItemFSM:
     def step(self, frame: np.ndarray,
              dets: List[Detection],
              hand: Optional[HandResult]) -> None:
+        self._last_dets = dets
         if frame is None: return
         h, w = frame.shape[:2]
         now  = time.monotonic()
@@ -292,6 +297,9 @@ class FindItemFSM:
         if obj is None:
             if now - self._t_search >= self.SEARCH_INT:
                 self._t_search = now
+                log.warning("[FSM] 找不到 target_en='%s'，偵測到的標籤：%s",
+                        self.target_en,
+                        [d.label for d in self._last_dets] if hasattr(self, '_last_dets') else "未記錄")
                 self._say(f"正在尋找{self.target_zh}，請慢慢轉動方向。")
             return
         self._say(f"已發現{self.target_zh}，正在引導方向。")
@@ -383,6 +391,9 @@ class FindItemFSM:
         confirm_kw = ["拿到", "確認", "完成", "找到", "到了", "好了"]
         stop_kw    = ["結束", "停止", "不要", "關閉", "停", "取消"]
 
+        confirm_kw += ["找到了", "找到啦", "找到", "拿到了", "拿到啦", "拿到", "確認", "确认", "完成", "好了", "可以了", "ok", "okay"]
+        stop_kw += ["結束", "结束", "停止", "不要", "關閉", "关闭", "取消", "停"]
+
         if any(k in text for k in confirm_kw):
             if self.state != FIState.WAITING_FOR_COMMAND:
                 self.confirm()
@@ -390,6 +401,7 @@ class FindItemFSM:
         if any(k in text for k in stop_kw):
             if self.state != FIState.WAITING_FOR_COMMAND:
                 self._reset()
+                _send_control_message({"type": "finish_item"})
             return
 
         m = re.search(r"找(?:一下|一個|個|下)?\s*(.{1,8}?)(?:$|[，。？！,!?])", text)
@@ -425,6 +437,12 @@ def _put_chinese(img: np.ndarray, text: str, pos,
             _FONT_CACHE[size] = ImageFont.load_default()
     draw.text(pos, text, font=_FONT_CACHE[size], fill=color)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+
+def _fit_display(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    if frame is None or width <= 0 or height <= 0:
+        return frame
+    return cv2.resize(frame, (int(width), int(height)), interpolation=cv2.INTER_LINEAR)
 
 
 # ════════════════════════════════════════════════════════
@@ -557,6 +575,19 @@ def _ws_producer(url: str):
 # (find_item_window 與 app_main 之間的雙向通道)
 _ctrl_ws_ref:  Optional[Any] = None   # websockets.WebSocketClientProtocol
 _ctrl_ws_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _send_control_message(payload: dict) -> None:
+    if _ctrl_ws_loop is None or _ctrl_ws_ref is None:
+        return
+
+    async def _send():
+        try:
+            await _ctrl_ws_ref.send(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            log.warning("[CTRL] send failed: %s", e)
+
+    asyncio.run_coroutine_threadsafe(_send(), _ctrl_ws_loop)
 
 
 def _control_ws_listener(url: str, fsm: "FindItemFSM"):
@@ -880,24 +911,18 @@ def unregister_from_app_main() -> None:
 def main():
     p = argparse.ArgumentParser(description="aiglass3 獨立尋物視窗")
     p.add_argument("--source",       choices=["webcam", "ws"], default="webcam")
-    p.add_argument("--ws-url",       default="ws://127.0.0.1:8765/ws/viewer")
+    p.add_argument("--ws-url",       default="ws://127.0.0.1:8765/ws/raw_viewer")
     p.add_argument("--control-url",  default="ws://127.0.0.1:8765/ws/find_item_control")
     p.add_argument("--webcam-index", type=int, default=0)
-    p.add_argument("--yolo-weights", default="yolov8s.pt",
-                   help="yolov8s.pt 對 cell phone 辨識準確； yolov8n.pt 速度較快")
+    p.add_argument("--yolo-weights", default="yolov8s.pt")
     p.add_argument("--yolo-device",  default="cpu")
-    p.add_argument("--yolo-conf",    type=float, default=0.45,
-                   help="0.35 太低易把手機誤判為 suitcase，預設提高到 0.45")
-    p.add_argument("--tts",
-                   choices=["esp32", "pc", "local", "print"],
-                   default="esp32",
-                   help=(
-                       "esp32  = 透過 WS 傳文字給 app_main 播放到 ESP32 喇叭（預設）；"
-                       "pc     = PC 喇叭（pygame/pyttsx3）；"
-                       "local  = 直接呼叫 audio_player（與 app_main 同 process 時才有效）；"
-                       "print  = 只印 terminal"
-                   ))
-    p.add_argument("--mic",          action="store_true")
+    p.add_argument("--yolo-conf",    type=float, default=0.5)
+    p.add_argument("--display-width", type=int, default=1200)
+    p.add_argument("--display-height", type=int, default=720)
+    p.add_argument("--tts",          choices=["relay", "local", "pc", "print"], default="relay",
+                   help="TTS 後端：local = aiglass3 play_voice_text；print = 只印 terminal")
+    p.add_argument("--mic",          action="store_true",
+                   help="啟用 PC 麥克風語音辨識")
     p.add_argument("--stt-model",    default="tiny")
     p.add_argument("--log-level",    default="INFO")
     args = p.parse_args()
@@ -907,29 +932,39 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # ── TTS 後端 ─────────────────────────────────────────
-    # ★ 修復說明：
-    #   兩個 process 不共享 audio_stream.stream_clients。
-    #   ESP32 連接的是 app_main.py 的 /stream.wav，
-    #   必須將 TTS 文字傳給 app_main.py 確保從正確 process 呼叫 play_voice_text()。
-    #   --tts esp32 即為此修復方案。
-    if args.tts == "esp32":
-        tts_fn = _make_relay_tts_fn()
-        log.info("[TTS] ESP32 中繼模式：將文字傳給 app_main.py 播放到 ESP32 喇叭")
-        log.info("[TTS] 請確認 app_main.py 已啟動，且 ESP32 已連接 /stream.wav")
-    elif args.tts == "pc":
-        tts_fn = _make_pc_tts_fn()
-    elif args.tts == "local":
+    # ── TTS 後端 ──────────────────────────────
+    tts_mode = args.tts  # "local" / "print"（esp32 中繼由 control WS 決定）
+
+    # 先嘗試 same-process local 模式
+    same_process = sys.modules.get("app_main") is not None
+
+    if same_process:
+        # 與 app_main 同 process → 直接借用 audio_player（最簡單）
         try:
-            from audio_player import play_voice_text, initialize_audio_system
-            initialize_audio_system()
+            from audio_player import play_voice_text
             tts_fn = play_voice_text
-            log.warning("[TTS] local 模式：僅當與 app_main.py 共用同一 process 時才會出聲")
+            log.info("[TTS] same-process: 使用 audio_player.play_voice_text")
         except ImportError:
-            log.warning("[TTS] 無法匯入 audio_player，改用 esp32 模式")
+            tts_fn = lambda t: print(f"[TTS] {t}", flush=True)
+    elif tts_mode == "local":
+        log.warning("[TTS] local requires same process as app_main; using relay instead")
+        tts_fn = _make_relay_tts_fn()
+    elif tts_mode == "pc":
+        tts_fn = _make_pc_tts_fn()
+    elif False:
+        try:
+            from audio_player import play_voice_text
+            tts_fn = play_voice_text
+            log.info("[TTS] local: 使用 audio_player.play_voice_text")
+        except ImportError:
+            log.warning("[TTS] 無法匯入 audio_player，退回 relay")
             tts_fn = _make_relay_tts_fn()
-    else:
+    elif tts_mode == "print":
         tts_fn = lambda t: print(f"[TTS] {t}", flush=True)
+    else:
+        # 預設：透過 control WS 中繼給 app_main（ESP32 喇叭）
+        tts_fn = _make_relay_tts_fn()
+        log.info("[TTS] relay: 透過 /ws/find_item_control 中繼給 app_main")
 
     detector = YoloDetector(args.yolo_weights, args.yolo_device, args.yolo_conf)
     hands    = HandsDetector(max_num_hands=1)
@@ -964,8 +999,8 @@ def main():
         log.info("[TIP] 可按視窗內 1~7 快捷鍵設定目標")
 
     WIN = "Find & Grab — aiglass3  (q 離開)"
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 1200, 720)
+    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
+    cv2.resizeWindow(WIN, args.display_width, args.display_height)
 
     log.info("[READY] 尋物視窗已就緒")
     tts_fn("尋物模式已啟動，請按鍵選擇目標。")
@@ -1008,7 +1043,8 @@ def main():
 
             target_det = fsm._find_target(dets)
             overlay    = draw_overlay(frame, fsm, dets, target_det, hand)
-            cv2.imshow(WIN, overlay)
+            display = _fit_display(overlay, args.display_width, args.display_height)
+            cv2.imshow(WIN, display)
 
             k = cv2.waitKey(1) & 0xFF
             if k in (ord('q'), 27): break
