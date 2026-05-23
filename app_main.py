@@ -1,7 +1,7 @@
 # app_main.py
 # -*- coding: utf-8 -*-
 # 導入我們剛寫好的語音引擎
-#python find_item_window.py --source ws --tts local --mic
+#python find_item_window.py --source ws --tts esp32
 from api.voice_engine import recognize_audio_from_file, text_to_speech_file
 from asr_core import process_voice_file_to_ai  # 這是剛才在 asr_core 新增的函數
 import os, sys, time, json, asyncio, base64, audioop
@@ -12,12 +12,12 @@ import re
 import audioop
 import wave
 import tempfile
-# 在其它 import 之后加：
+# 在其它 import 之後加：
 from qwen_extractor import extract_english_label
 from navigation_master import NavigationMaster, OrchestratorResult 
-# 新增：导入盲道导航器
+# 新增：導入盲道導航器
 from workflow_blindpath import BlindPathNavigator
-# 新增：导入过马路导航器
+# 新增：導入過馬路導航器
 from workflow_crossstreet import CrossStreetNavigator
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -33,9 +33,9 @@ from obstacle_detector_client import ObstacleDetectorClient
 import mediapipe as mp
 import bridge_io
 import threading
-import yolomedia  # 确保和 app_main.py 同目录，文件名就是 yolomedia.py
+import yolomedia  # 確保和 app_main.py 同目錄，文件名就是 yolomedia.py
 
-# ---- Windows 事件循环策略 ----
+# ---- Windows 事件循環策略 ----
 if sys.platform.startswith("win"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -50,7 +50,7 @@ except Exception:
     pass
 
 # ---- DashScope ASR 基础 ----
-from dashscope import audio as dash_audio  # 若未安装，会在原项目里抛错提示
+from dashscope import audio as dash_audio  # 若未安裝，會在原項目裡抋錯提示
 
 # groq api
 from groq import AsyncGroq
@@ -63,7 +63,7 @@ CHUNK_MS     = 20
 BYTES_CHUNK  = SAMPLE_RATE * CHUNK_MS // 1000 * 2
 SILENCE_20MS = bytes(BYTES_CHUNK)
 
-# ---- 引入我们的模块 ----
+# ---- 引入我們的模組 ----
 from audio_stream import (
     register_stream_route,
     broadcast_pcm16_realtime,
@@ -80,7 +80,7 @@ from asr_core import (
 )
 from audio_player import initialize_audio_system, play_voice_text
 
-# ---- 同步录制器 ----
+# ---- 同步錄製器 ----
 import sync_recorder
 import signal
 import atexit
@@ -91,7 +91,7 @@ UDP_PORT = 12345
 
 app = FastAPI()
 
-# ====== 状态与容器 ======
+# ====== 狀態與容器 ======
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 ui_clients: Dict[int, WebSocket] = {}
@@ -175,8 +175,6 @@ def signal_handler(sig, frame):
     cleanup_on_exit()
     sys.exit(0)
 
-# ── 關鍵修正：signal.signal() 只能在主執行緒呼叫 ──
-# 當被 gui_window.py 在子執行緒 import 時跳過，避免 ValueError
 import threading as _threading
 if _threading.current_thread() is _threading.main_thread():
     signal.signal(signal.SIGINT, signal_handler)
@@ -187,9 +185,9 @@ print("[RECORDER] 已注册退出处理器 - Ctrl+C时会自动保存录制文�
 
 try:
     import trafficlight_detection
-    print("[TRAFFIC_LIGHT] 开始预加载红绿灯检测模型...")
+    print("[TRAFFIC_LIGHT] 开始预加载红绳灯检测模型...")
     if trafficlight_detection.init_model():
-        print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载成功")
+        print("[TRAFFIC_LIGHT] 红绳灯检测模型预加载成功")
         try:
             test_img = np.zeros((640, 640, 3), dtype=np.uint8)
             _ = trafficlight_detection.process_single_frame(test_img)
@@ -197,9 +195,9 @@ try:
         except Exception as e:
             print(f"[TRAFFIC_LIGHT] 模型预热失败: {e}")
     else:
-        print("[TRAFFIC_LIGHT] 红绿灯检测模型预加载失败")
+        print("[TRAFFIC_LIGHT] 红绳灯检测模型预加载失败")
 except Exception as e:
-    print(f"[TRAFFIC_LIGHT] 红绿灯模型预加载出错: {e}")
+    print(f"[TRAFFIC_LIGHT] 红绳灯模型预加载出错: {e}")
 
 interrupt_lock = asyncio.Lock()
 
@@ -210,9 +208,9 @@ yolomedia_sending_frames = False
 
 ITEM_TO_CLASS_MAP = {
     "红牛": "Red_Bull",
-    "AD钙奶": "AD_milk",
-    "ad钙奶": "AD_milk",
-    "钙奶": "AD_milk",
+    "AD钒奶": "AD_milk",
+    "ad钒奶": "AD_milk",
+    "钒奶": "AD_milk",
 }
 
 async def ui_broadcast_raw(msg: str):
@@ -245,7 +243,7 @@ async def full_system_reset(reason: str = ""):
     await stop_current_recognition()
     if orchestrator:
         orchestrator.stop_navigation()
-        print(f"[SYSTEM] 導航已從系統重置中強制關閉 (原因: {reason})")
+        print(f"[SYSTEM] 導航已從系统重置中強制關閉 (原因: {reason})")
     if yolomedia_running:
         stop_yolomedia()
     global current_partial, recent_finals
@@ -265,7 +263,6 @@ async def full_system_reset(reason: str = ""):
 _find_window_fsm = None  # find_item_window.py 啟動後會注入
 
 def register_find_window_fsm(fsm):
-    """讓 find_item_window.py 在啟動時把 FSM 物件注入到 app_main"""
     global _find_window_fsm
     _find_window_fsm = fsm
     print("[APP_MAIN] find_item_window FSM 已注冊", flush=True)
@@ -433,7 +430,6 @@ async def start_ai_with_text_custom(user_text: str):
         item_cn = match.group(1).strip() if match else "物品"
         label_en, src = extract_english_label(item_cn)
 
-        # 通知 find_item_window.py 的 FSM
         _notify_find_window(item_cn, label_en)
 
         if orchestrator:
@@ -443,7 +439,7 @@ async def start_ai_with_text_custom(user_text: str):
         await ui_broadcast_final(f"[找物品] 正在尋找 {item_cn}...")
         play_voice_text(f"正在尋找 {item_cn}。")
         return
-    print(f"[OMNI] 未知指令，已攔截: {user_text}")
+    print(f"[OMNI] 未知指令，已攔戴: {user_text}")
     await ui_broadcast_final(f"[系统] 未知指令: {user_text}")
 
 async def start_ai_with_text(user_text: str):
@@ -631,13 +627,13 @@ async def ws_camera_esp(ws: WebSocket):
     print("[CAMERA] ESP32 connected")
     if blind_path_navigator is None and yolo_seg_model is not None:
         blind_path_navigator = BlindPathNavigator(yolo_seg_model, obstacle_detector)
-        print("[NAVIGATION] 盲道导航器已初始化")
+        print("[NAVIGATION] 盲道導航器已初始化")
     if cross_street_navigator is None and yolo_seg_model:
         cross_street_navigator = CrossStreetNavigator(seg_model=yolo_seg_model, coco_model=None, obs_model=None)
-        print("[CROSS_STREET] 过马路导航器已初始化")
+        print("[CROSS_STREET] 過馬路導航器已初始化")
     if orchestrator is None and blind_path_navigator is not None and cross_street_navigator is not None:
         orchestrator = NavigationMaster(blind_path_navigator, cross_street_navigator)
-        print("[NAV MASTER] 统领状态机已初始化")
+        print("[NAV MASTER] 統領狀態機已初始化")
     frame_counter = 0
     try:
         while True:
@@ -688,7 +684,7 @@ async def ws_camera_esp(ws: WebSocket):
                                 except Exception: pass
                             out_img = res.annotated_image if res.annotated_image is not None else bgr
                     except Exception as e:
-                        if frame_counter % 100 == 0: print(f"[NAV MASTER] 处理帧时出错: {e}")
+                        if frame_counter % 100 == 0: print(f"[NAV MASTER] 處理幀時出錯: {e}")
                     if camera_viewers and out_img is not None:
                         ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                         if ok:
@@ -729,7 +725,7 @@ async def ws_camera_esp(ws: WebSocket):
         if cross_street_navigator: cross_street_navigator.reset()
         if orchestrator:
             orchestrator.reset()
-            print("[NAV MASTER] 统领器已重置")
+            print("[NAV MASTER] 統領器已重置")
 
 @app.websocket("/ws/viewer")
 async def ws_viewer(ws: WebSocket):
@@ -746,6 +742,11 @@ async def ws_viewer(ws: WebSocket):
         except Exception: pass
         print(f"[VIEWER] Removed. Total viewers: {len(camera_viewers)}", flush=True)
 
+
+# ★ 修復重點：/ws/find_item_control 變為雙向通道
+# 除了傳命令給 find_item_window 之外，
+# 還要接收 find_item_window 傳來的 TTS 請求，
+# 在本 process 呼叫 play_voice_text() → stream_clients 有 ESP32 → 出聲
 @app.websocket("/ws/find_item_control")
 async def ws_find_item_control(ws: WebSocket):
     await ws.accept()
@@ -753,7 +754,20 @@ async def ws_find_item_control(ws: WebSocket):
     print(f"[FIND_WINDOW] Control connected. Total: {len(find_window_control_clients)}", flush=True)
     try:
         while True:
-            await ws.receive_text()
+            msg_text = await ws.receive_text()
+            # ★ 解析 find_item_window 傳回的訊息
+            try:
+                data = json.loads(msg_text)
+                msg_type = data.get("type")
+                if msg_type == "tts":
+                    # find_item_window 請求播放 TTS 到 ESP32 喇叭
+                    text = str(data.get("text") or "").strip()
+                    if text:
+                        play_voice_text(text)
+                        print(f"[FIND_CTRL] TTS relay: {text}", flush=True)
+                # "hello" 及其他類型忽略
+            except Exception:
+                pass  # 非 JSON 或不需要處理的訊息
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -761,6 +775,7 @@ async def ws_find_item_control(ws: WebSocket):
     finally:
         find_window_control_clients.discard(ws)
         print(f"[FIND_WINDOW] Control removed. Total: {len(find_window_control_clients)}", flush=True)
+
 
 @app.websocket("/ws")
 async def ws_imu(ws: WebSocket):
