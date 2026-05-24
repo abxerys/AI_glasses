@@ -1,5 +1,12 @@
 .venv/
 venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ultralytics/
+.vscode/
+temp_tts/
 runs/
 *.exe
 *.avi
@@ -13,3 +20,8 @@ videos/
 *.mp4
 recordings/
 *.wav
+*.pyc
+*.pyo
+*.log
+.env
+.env.*

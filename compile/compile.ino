@@ -16,9 +16,9 @@ struct WavFmt;
 using namespace websockets;
 
 // ===== WiFi / Server =====
-const char* WIFI_SSID   = "D-Link_DIR-13";
-const char* WIFI_PASS   = "0918850082";
-const char* SERVER_HOST = "192.168.100.2";
+const char* WIFI_SSID   = "303-5G";
+const char* WIFI_PASS   = "gfourg40";
+const char* SERVER_HOST = "192.168.0.12";
 const uint16_t SERVER_PORT = 8765;
 
 static const char* CAM_WS_PATH = "/ws/camera";
@@ -132,15 +132,17 @@ bool init_camera() {
     s->set_hmirror(s, 1);  // ??? ??��??�?水平??????�?�?人�?�左??��????��??1=�?�?0=??��??
     s->set_vflip(s, 0);    // ??? ??��??�??????�翻转�????��??头�?????�????�???�为 1
 
-    s->set_brightness(s, 0);
+    s->set_brightness(s, 2);
     s->set_contrast(s, 1);
-    s->set_saturation(s, 1);
+    s->set_saturation(s, 0);
     s->set_gain_ctrl(s, 1);
-    s->set_exposure_ctrl(s, 0);
+    s->set_exposure_ctrl(s, 1);
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
-    s->set_aec2(s, 0);
-    s->set_aec_value(s, 40);
+    s->set_aec2(s, 1);
+    s->set_ae_level(s, 2);
+    s->set_gainceiling(s, GAINCEILING_16X);
+    s->set_aec_value(s, 650);
   }
   return true;
 }
@@ -975,6 +977,33 @@ void setup() {
         int f = cmd.substring(strlen("SET:FPS=")).toInt();
         g_target_fps = (f <= 0 ? 0 : constrain(f, 5, 60));
         Serial.printf("[CAM] target_fps=%d\n", g_target_fps);
+      }
+      else if (cmd.startsWith("SET:BRIGHTNESS=")) {
+        int v = constrain(cmd.substring(strlen("SET:BRIGHTNESS=")).toInt(), -2, 2);
+        sensor_t* s = esp_camera_sensor_get();
+        if (s) { s->set_brightness(s, v); Serial.printf("[CAM] brightness=%d\n", v); }
+      }
+      else if (cmd.startsWith("SET:AE_LEVEL=")) {
+        int v = constrain(cmd.substring(strlen("SET:AE_LEVEL=")).toInt(), -2, 2);
+        sensor_t* s = esp_camera_sensor_get();
+        if (s) { s->set_ae_level(s, v); Serial.printf("[CAM] ae_level=%d\n", v); }
+      }
+      else if (cmd.startsWith("SET:AEC_VALUE=")) {
+        int v = constrain(cmd.substring(strlen("SET:AEC_VALUE=")).toInt(), 0, 1200);
+        sensor_t* s = esp_camera_sensor_get();
+        if (s) {
+          s->set_exposure_ctrl(s, 0);
+          s->set_aec_value(s, v);
+          Serial.printf("[CAM] manual aec_value=%d\n", v);
+        }
+      }
+      else if (cmd == "SET:AUTO_EXPOSURE=1") {
+        sensor_t* s = esp_camera_sensor_get();
+        if (s) {
+          s->set_exposure_ctrl(s, 1);
+          s->set_aec2(s, 1);
+          Serial.println("[CAM] auto exposure on");
+        }
       }
 
       else if (cmd == "SNAP:HQ") {

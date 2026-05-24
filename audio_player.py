@@ -8,6 +8,7 @@ import asyncio
 import threading
 import queue
 import time
+import subprocess
 from audio_stream import broadcast_pcm16_realtime
 from audio_compressor import compressed_audio_cache, AudioCompressor
 import uuid
@@ -68,6 +69,23 @@ _is_playing = False  # 标记是否正在播放音频
 _playing_lock = threading.Lock()  # 播放锁
 _initialized = False
 _last_play_ts = 0.0  # 记录上次播放结束时间，用于决定预热静音长度
+
+def _tts_speed() -> float:
+    try:
+        return max(0.8, min(2.0, float(os.getenv("AIGLASS_TTS_SPEED", "1.75"))))
+    except Exception:
+        return 1.75
+
+
+def _speedup_audio_segment(audio: pydub.AudioSegment) -> pydub.AudioSegment:
+    speed = _tts_speed()
+    if abs(speed - 1.0) < 0.01:
+        return audio
+    return audio._spawn(
+        audio.raw_data,
+        overrides={"frame_rate": int(audio.frame_rate * speed)}
+    ).set_frame_rate(audio.frame_rate)
+
 
 def load_wav_file(filepath):
     """加载WAV文件并返回PCM数据（自动转换为8kHz）"""
@@ -334,6 +352,136 @@ VOICE_PRIORITY = {
 TTS_TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_tts")
 if not os.path.exists(TTS_TEMP_DIR):
     os.makedirs(TTS_TEMP_DIR)
+
+_dynamic_tts_queue = queue.Queue(maxsize=1)
+_dynamic_tts_worker_thread = None
+_dynamic_tts_lock = threading.Lock()
+_dynamic_tts_seq = 0
+
+
+def _latest_dynamic_tts_seq() -> int:
+    with _dynamic_tts_lock:
+        return _dynamic_tts_seq
+
+
+def _ensure_dynamic_tts_worker():
+    global _dynamic_tts_worker_thread
+    with _dynamic_tts_lock:
+        if _dynamic_tts_worker_thread and _dynamic_tts_worker_thread.is_alive():
+            return
+        _dynamic_tts_worker_thread = threading.Thread(
+            target=_dynamic_tts_worker,
+            daemon=True,
+            name="dynamic-tts-worker",
+        )
+        _dynamic_tts_worker_thread.start()
+
+
+def _queue_dynamic_tts(text: str):
+    global _dynamic_tts_seq
+    _ensure_dynamic_tts_worker()
+    with _dynamic_tts_lock:
+        _dynamic_tts_seq += 1
+        seq = _dynamic_tts_seq
+
+    try:
+        while True:
+            _dynamic_tts_queue.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        _dynamic_tts_queue.put_nowait((seq, text))
+    except queue.Full:
+        pass
+
+
+def _run_ffmpeg_tempo(mp3_path: str, wav_path: str) -> bool:
+    speed = _tts_speed()
+    ffmpeg_path = pydub.AudioSegment.converter or os.path.join(current_dir, "ffmpeg.exe")
+    if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+        return False
+
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-loglevel", "error",
+        "-i", mp3_path,
+        "-filter:a", f"atempo={speed:.3f}",
+        "-ar", "8000",
+        "-ac", "1",
+        "-sample_fmt", "s16",
+        wav_path,
+    ]
+    try:
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+            "check": True,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.run(cmd, **kwargs)
+        return True
+    except Exception as e:
+        print(f"[AUDIO] ffmpeg atempo 失敗，改用內建加速: {e}")
+        return False
+
+
+def _enqueue_pcm_for_playback(pcm_data: bytes, label: str):
+    global _audio_priority, _audio_queue
+    if not pcm_data:
+        return
+
+    _audio_priority += 1
+    with _audio_queue.mutex:
+        _audio_queue.queue.clear()
+    _audio_queue.put_nowait((_audio_priority, pcm_data))
+    print(f"[AUDIO] AI 語音播放推送成功: {label}")
+
+
+def _dynamic_tts_worker():
+    while True:
+        seq, text = _dynamic_tts_queue.get()
+        mp3_path = None
+        wav_path = None
+        try:
+            unique_id = uuid.uuid4().hex
+            mp3_path = os.path.join(TTS_TEMP_DIR, f"{unique_id}.mp3")
+            wav_path = os.path.join(TTS_TEMP_DIR, f"{unique_id}.wav")
+
+            print(f"[AUDIO] 生成 TTS: {text} (speed={_tts_speed():.2f}x)")
+            gTTS(text=text, lang="zh-tw").save(mp3_path)
+
+            if seq != _latest_dynamic_tts_seq():
+                print(f"[AUDIO] 略過已過期 TTS: {text}")
+                continue
+
+            if _run_ffmpeg_tempo(mp3_path, wav_path):
+                audio = pydub.AudioSegment.from_wav(wav_path)
+            else:
+                audio = pydub.AudioSegment.from_mp3(mp3_path)
+                audio = _speedup_audio_segment(audio)
+                audio = audio.set_frame_rate(8000)
+                audio = audio.set_channels(1)
+                audio = audio.set_sample_width(2)
+
+            audio += 2
+
+            if seq != _latest_dynamic_tts_seq():
+                print(f"[AUDIO] 略過已過期 TTS: {text}")
+                continue
+
+            _enqueue_pcm_for_playback(audio.raw_data, text)
+        except Exception as e:
+            print(f"[AUDIO] AI TTS 生成/播放失敗: {e}")
+        finally:
+            for path in (mp3_path, wav_path):
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
 # 新增：根据中文提示文案直接播放（会做轻度规范化与降级）
 #change
 def play_voice_text(text: str):
@@ -361,51 +509,8 @@ def play_voice_text(text: str):
         play_audio_threadsafe(text)
         return
 
-    # 【實作理由 2：為主執行緒解鎖 (Thread Non-blocking)】
-    # 當遇到無法對應快取的動態文字 (例如 "紅綠燈檢測已啟動") 時，
-    # 必須將同步的 gTTS 網路請求與 pydub 檔案處理放進背景執行緒 (Background Thread)。
-    # 這樣才不會卡死 FastAPI 的主非同步迴圈，確保 ESP32 的 HTTP 音訊串流能平順傳輸而不超時。
-    def _tts_task():
-        try:
-            unique_id = uuid.uuid4().hex
-            mp3_path = os.path.join(TTS_TEMP_DIR, f"{unique_id}.mp3")
-            wav_path = os.path.join(TTS_TEMP_DIR, f"{unique_id}.wav")
-
-            print(f"[AUDIO] 正在生成 TTS 語音 (背景): {text}")
-            tts = gTTS(text=text, lang='zh-tw')
-            tts.save(mp3_path)
-
-            audio = pydub.AudioSegment.from_mp3(mp3_path)
-            audio = audio.set_frame_rate(8000)
-            audio = audio.set_channels(1)
-            audio = audio.set_sample_width(2)
-            audio.export(wav_path, format="wav")
-
-            audio += 2
-            pcm_data = audio.raw_data
-
-            if pcm_data:
-                global _audio_priority, _audio_queue
-                _audio_priority += 1
-                
-                # 清空目前佇列以確保即時性
-                with _audio_queue.mutex:
-                    _audio_queue.queue.clear()
-                
-                _audio_queue.put_nowait((_audio_priority, pcm_data))
-                print(f"[AUDIO] AI 語音播放推送成功: {text}")
-
-            try:
-                if os.path.exists(mp3_path): os.remove(mp3_path)
-                if os.path.exists(wav_path): os.remove(wav_path)
-            except Exception:
-                pass
-                
-        except Exception as e:
-            print(f"[AUDIO] AI 語音生成/播放失敗: {e}")
-
-    # 啟動背景執行緒去處理語音生成，讓主迴圈立刻放行
-    threading.Thread(target=_tts_task, daemon=True).start()
+    _queue_dynamic_tts(text)
+    return
 
 # 兼容旧接口
 play_audio_on_esp32 = play_audio_threadsafe

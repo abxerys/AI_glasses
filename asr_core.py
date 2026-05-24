@@ -6,9 +6,10 @@ from openai import OpenAI
 
 ASR_DEBUG_RAW = os.getenv("ASR_DEBUG_RAW", "0") == "1"
 
-groq_client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY", ""), 
-    base_url="https://api.groq.com/openai/v1"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+groq_client = (
+    OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    if GROQ_API_KEY else None
 )
 
 def _shorten(s: str, limit: int = 200) -> str:
@@ -216,6 +217,9 @@ def recognize_speech_whisper(audio_file_path: str) -> str:
         if not os.path.exists(audio_file_path):
             print(f"[ASR Error] 找不到音檔: {audio_file_path}")
             return ""
+        if groq_client is None:
+            print("[ASR Error] 未設定 GROQ_API_KEY，無法使用 Groq Whisper。")
+            return ""
 
         with open(audio_file_path, "rb") as audio_file:
             print(f"[Groq Whisper] 正在上傳音檔至 Groq 進行辨識...")
@@ -253,6 +257,11 @@ async def process_voice_file_to_ai(wav_path: str, asr_callback: ASRCallback):
             "红绿灯", "紅綠燈", "盲道", "导航", "導航",
             "找", "识别", "識別", "停止", "结束", "繼續"
         ]
+        allowed_keywords.extend([
+            "我要找", "幫我找", "帮我找", "尋找", "寻找",
+            "手機", "手机", "幫我導航", "帮我导航",
+            "交通燈", "交通灯", "停止", "結束", "取消",
+        ])
         if not any(keyword in text for keyword in allowed_keywords):
             print(f"[ASR_CORE] 未包含觸發關鍵字，忽略此語音: {text}")
             return

@@ -99,6 +99,7 @@ current_partial: str = ""
 recent_finals: List[str] = []
 RECENT_MAX = 50
 last_frames: Deque[Tuple[float, bytes]] = deque(maxlen=10)
+LOCAL_WEBCAM_INDEX = int(os.getenv("LOCAL_WEBCAM_INDEX", "0"))
 
 camera_viewers: Set[WebSocket] = set()
 raw_camera_viewers: Set[WebSocket] = set()
@@ -171,15 +172,48 @@ def cleanup_on_exit():
     except Exception as e:
         print(f"[SYSTEM] 关闭录制器时出错: {e}")
 
+_cleanup_done = False
+_cleanup_lock = threading.Lock()
+
+def cleanup_on_exit(timeout_sec: float = 3.0):
+    global _cleanup_done
+    with _cleanup_lock:
+        if _cleanup_done:
+            return
+        _cleanup_done = True
+
+    print("\n[SYSTEM] stopping recorder...", flush=True)
+    done = threading.Event()
+
+    def _stop():
+        try:
+            sync_recorder.stop_recording()
+            print("[SYSTEM] recorder stopped", flush=True)
+        except Exception as e:
+            print(f"[SYSTEM] recorder stop failed: {e}", flush=True)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_stop, daemon=True, name="recorder-stop")
+    t.start()
+    t.join(timeout=max(0.1, float(timeout_sec)))
+    if not done.is_set():
+        print("[SYSTEM] recorder stop timed out; continuing shutdown", flush=True)
+
 def signal_handler(sig, frame):
     print("\n[SYSTEM] 收到中断信号，正在安全退出...")
-    cleanup_on_exit()
+    cleanup_on_exit(timeout_sec=1.5)
+    if os.getenv("AIGLASS_FORCE_EXIT", "1") == "1":
+        os._exit(0)
     sys.exit(0)
 
 # ── 關鍵修正：signal.signal() 只能在主執行緒呼叫 ──
 # 當被 gui_window.py 在子執行緒 import 時跳過，避免 ValueError
 import threading as _threading
-if _threading.current_thread() is _threading.main_thread():
+if (
+    os.getenv("AIGLASS_CUSTOM_SIGNAL", "1" if __name__ == "__main__" else "0") == "1"
+    and _threading.current_thread() is _threading.main_thread()
+):
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 atexit.register(cleanup_on_exit)
@@ -252,6 +286,104 @@ async def broadcast_raw_camera_frame(jpeg_data: bytes):
     for d in dead:
         raw_camera_viewers.discard(d)
 
+
+async def _broadcast_viewer_frame(jpeg_data: bytes):
+    if not camera_viewers or not jpeg_data:
+        return
+    dead = []
+    for viewer_ws in list(camera_viewers):
+        try:
+            await viewer_ws.send_bytes(jpeg_data)
+        except Exception:
+            dead.append(viewer_ws)
+    for d in dead:
+        camera_viewers.discard(d)
+
+
+async def _local_webcam_broadcaster():
+    """Optional local camera fallback for testing /ws/raw_viewer without ESP32."""
+    import concurrent.futures
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="LocalCam"
+    )
+    loop = asyncio.get_running_loop()
+    cap = None
+
+    def _open():
+        c = cv2.VideoCapture(LOCAL_WEBCAM_INDEX, cv2.CAP_DSHOW)
+        if c.isOpened():
+            c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            c.set(cv2.CAP_PROP_FPS, 15)
+        return c
+
+    def _read(c):
+        return c.read()
+
+    def _release(c):
+        c.release()
+
+    try:
+        print(
+            f"[LOCAL_CAM] enabled, using webcam index {LOCAL_WEBCAM_INDEX} "
+            "when ESP32 camera is not connected",
+            flush=True,
+        )
+        while True:
+            if esp32_camera_ws is not None:
+                if cap is not None:
+                    await loop.run_in_executor(executor, _release, cap)
+                    cap = None
+                    print("[LOCAL_CAM] ESP32 connected; local webcam paused", flush=True)
+                await asyncio.sleep(0.5)
+                continue
+
+            if not raw_camera_viewers and not camera_viewers:
+                if cap is not None:
+                    await loop.run_in_executor(executor, _release, cap)
+                    cap = None
+                await asyncio.sleep(0.3)
+                continue
+
+            if cap is None:
+                cap = await loop.run_in_executor(executor, _open)
+                if not cap.isOpened():
+                    print(
+                        f"[LOCAL_CAM] failed to open webcam #{LOCAL_WEBCAM_INDEX}; retrying",
+                        flush=True,
+                    )
+                    cap = None
+                    await asyncio.sleep(2.0)
+                    continue
+                print(f"[LOCAL_CAM] webcam #{LOCAL_WEBCAM_INDEX} opened", flush=True)
+
+            ok, frame = await loop.run_in_executor(executor, _read, cap)
+            if not ok or frame is None:
+                await asyncio.sleep(0.05)
+                continue
+
+            ok, enc = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if ok:
+                jpeg_data = enc.tobytes()
+                try:
+                    last_frames.append((time.time(), jpeg_data))
+                except Exception:
+                    pass
+                await broadcast_raw_camera_frame(jpeg_data)
+                await _broadcast_viewer_frame(jpeg_data)
+
+            await asyncio.sleep(1 / 15)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        executor.shutdown(wait=False)
+
 async def full_system_reset(reason: str = ""):
     global current_partial, recent_finals, orchestrator, yolomedia_running
     await hard_reset_audio(reason or "full_system_reset")
@@ -276,6 +408,48 @@ async def full_system_reset(reason: str = ""):
     print("[SYSTEM] full reset done.", flush=True)
     
 _find_window_fsm = None  # find_item_window.py 啟動後會注入
+_find_item_active = False
+_find_item_target_zh = ""
+_find_item_target_en = ""
+
+def _set_find_item_active(active: bool,
+                          zh: str = "",
+                          en: str = "",
+                          reason: str = ""):
+    global _find_item_active, _find_item_target_zh, _find_item_target_en
+    active = bool(active)
+    changed = (_find_item_active != active)
+    _find_item_active = active
+    if active:
+        if zh:
+            _find_item_target_zh = zh
+        if en:
+            _find_item_target_en = en
+    else:
+        _find_item_target_zh = ""
+        _find_item_target_en = ""
+    if changed or reason:
+        state = "active" if active else "idle"
+        target = f" target={_find_item_target_zh}/{_find_item_target_en}" if active else ""
+        print(f"[FIND_ITEM] state={state}{target} reason={reason}", flush=True)
+
+def _is_find_item_search_active() -> bool:
+    if _find_item_active or yolomedia_running:
+        return True
+    if orchestrator and hasattr(orchestrator, "get_state"):
+        try:
+            if orchestrator.get_state() == "ITEM_SEARCH":
+                return True
+        except Exception:
+            pass
+    if _find_window_fsm is not None:
+        try:
+            state = getattr(_find_window_fsm, "state", None)
+            if state is not None and getattr(state, "name", "") != "WAITING_FOR_COMMAND":
+                return True
+        except Exception:
+            pass
+    return False
 
 def register_find_window_fsm(fsm):
     """讓 find_item_window.py 在啟動時把 FSM 物件注入到 app_main"""
@@ -283,15 +457,6 @@ def register_find_window_fsm(fsm):
     _find_window_fsm = fsm
     print("[APP_MAIN] find_item_window FSM 已注冊", flush=True)
 
-def _notify_find_window(zh: str, en: str):
-    global _find_window_fsm
-    if _find_window_fsm is not None:
-        try:
-            _find_window_fsm.set_target(zh, en)
-            print(f"[APP_MAIN] 已通知 find_window FSM：{zh} ({en})", flush=True)
-        except Exception as e:
-            print(f"[APP_MAIN] 通知 find_window FSM 失敗：{e}", flush=True)
-            
 async def _broadcast_find_window_command(payload: Dict[str, Any]):
     if not find_window_control_clients:
         return
@@ -314,6 +479,10 @@ def _schedule_find_window_command(payload: Dict[str, Any]):
 
 def _notify_find_window_mode(mode: str):
     global _find_window_fsm
+    if mode == "FIND_ITEM":
+        _set_find_item_active(True, reason="mode")
+    else:
+        _set_find_item_active(False, reason=f"mode:{mode}")
     if _find_window_fsm is not None:
         try:
             if hasattr(_find_window_fsm, "set_app_mode"):
@@ -326,6 +495,7 @@ def _notify_find_window_mode(mode: str):
 
 def _notify_find_window(zh: str, en: str):
     global _find_window_fsm
+    _set_find_item_active(True, zh, en, "target")
     if _find_window_fsm is not None:
         try:
             if hasattr(_find_window_fsm, "set_app_mode"):
@@ -388,7 +558,30 @@ def stop_yolomedia():
         yolomedia_sending_frames = False
         print("[YOLOMEDIA] Worker stopped.", flush=True)
 
+def _rule_based_intent(user_text: str) -> Optional[str]:
+    text = (user_text or "").strip().lower()
+    if not text:
+        return None
+    if _is_item_finish_command(text):
+        return "STOP"
+    stop_words = ["停止", "停下", "結束", "结束", "不要", "取消", "關閉", "关闭", "stop"]
+    if any(w in text for w in stop_words):
+        return "STOP"
+    if any(w in text for w in ["紅綠燈", "红绿灯", "交通燈", "交通灯", "綠燈", "绿灯"]):
+        return "TRAFFIC_LIGHT"
+    if any(w in text for w in ["過馬路", "过马路", "斑馬線", "斑马线", "穿越"]):
+        return "CROSS_STREET"
+    if any(w in text for w in ["我要找", "幫我找", "帮我找", "尋找", "寻找", "找一下", "找"]):
+        return "FIND_ITEM"
+    if any(w in text for w in ["導航", "导航", "盲道", "帶路", "带路", "往前走", "幫我導航", "帮我导航"]):
+        return "BLIND_PATH"
+    return None
+
 async def analyze_intent_with_groq(user_text: str) -> str:
+    local_intent = _rule_based_intent(user_text)
+    if local_intent:
+        print(f"[LOCAL ROUTER] {user_text} -> {local_intent}", flush=True)
+        return local_intent
     stop_keywords = ["結束", "停止", "不要", "關閉", "停"]
     if any(k in user_text for k in stop_keywords):
         return "STOP"
@@ -422,10 +615,11 @@ async def analyze_intent_with_groq(user_text: str) -> str:
 async def start_ai_with_text_custom(user_text: str):
     global navigation_active, blind_path_navigator, cross_street_active, cross_street_navigator, orchestrator, yolomedia_running
     print(f"[COMMAND_CHECK] 收到語音指令: {user_text}")
-    if _is_item_finish_command(user_text) and (
-        yolomedia_running or (orchestrator and orchestrator.get_state() == "ITEM_SEARCH")
-    ):
-        await finish_item_search("voice_finish")
+    if _is_item_finish_command(user_text):
+        if _is_find_item_search_active():
+            await finish_item_search("voice_finish")
+        else:
+            print(f"[COMMAND_CHECK] 忽略尋物完成回音: {user_text}", flush=True)
         return
     intent = await analyze_intent_with_groq(user_text)
     print(f"[LLM ROUTER] 判斷結果: {intent}")
@@ -551,6 +745,15 @@ def root():
 @app.get("/api/health", response_class=PlainTextResponse)
 def health():
     return "OK"
+
+@app.get("/api/prompt", response_class=PlainTextResponse)
+async def api_prompt(text: str):
+    text = (text or "").strip()
+    if not text:
+        return "ERR: empty text"
+    async with interrupt_lock:
+        await start_ai_with_text_custom(text)
+    return f"OK: {text}"
 
 register_stream_route(app)
 
@@ -800,6 +1003,15 @@ async def ws_raw_viewer(ws: WebSocket):
     await ws.accept()
     raw_camera_viewers.add(ws)
     print(f"[RAW_VIEWER] Connected. Total viewers: {len(raw_camera_viewers)}", flush=True)
+    if last_frames:
+        try:
+            _, jpeg_data = last_frames[-1]
+            await ws.send_bytes(jpeg_data)
+            print("[RAW_VIEWER] Sent cached latest frame", flush=True)
+        except Exception as e:
+            print(f"[RAW_VIEWER] Failed to send cached frame: {e}", flush=True)
+    else:
+        print("[RAW_VIEWER] No cached frame yet; waiting for camera frames", flush=True)
     try:
         while True:
             await asyncio.sleep(60)
@@ -827,6 +1039,17 @@ async def ws_find_item_control(ws: WebSocket):
                     play_voice_text(text)
             elif data.get("type") == "finish_item":
                 await finish_item_search("find_window_finish")
+            elif data.get("type") == "state":
+                mode = str(data.get("mode") or "IDLE").strip()
+                if mode == "FIND_ITEM":
+                    _set_find_item_active(
+                        True,
+                        str(data.get("zh") or "").strip(),
+                        str(data.get("en") or "").strip(),
+                        "find_window_state",
+                    )
+                else:
+                    _set_find_item_active(False, reason=f"find_window_state:{mode}")
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -995,11 +1218,19 @@ async def on_startup():
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(lambda: UDPProto(), local_addr=(UDP_IP, UDP_PORT))
 
+@app.on_event("startup")
+async def on_startup_local_cam():
+    if os.getenv("ENABLE_LOCAL_CAM", "0") == "1":
+        asyncio.create_task(_local_webcam_broadcaster())
+    else:
+        print("[LOCAL_CAM] disabled; set ENABLE_LOCAL_CAM=1 to test without ESP32", flush=True)
+
 @app.on_event("shutdown")
 async def on_shutdown():
     print("[SHUTDOWN] 开始清理资源...")
     stop_yolomedia()
     await hard_reset_audio("shutdown")
+    cleanup_on_exit(timeout_sec=3.0)
     print("[SHUTDOWN] 资源清理完成")
 
 def get_last_frames():
@@ -1009,8 +1240,13 @@ def get_camera_ws():
     return esp32_camera_ws
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app, host="0.0.0.0", port=8765,
-        log_level="warning", access_log=False,
-        loop="asyncio", workers=1, reload=False
-    )
+    try:
+        uvicorn.run(
+            app, host="0.0.0.0", port=8765,
+            log_level="warning", access_log=False,
+            loop="asyncio", workers=1, reload=False
+        )
+    finally:
+        cleanup_on_exit(timeout_sec=1.0)
+        if os.getenv("AIGLASS_FORCE_EXIT", "1") == "1":
+            os._exit(0)

@@ -238,6 +238,12 @@ class FindItemFSM:
         self._t_head = self._t_hand = self._t_search = 0.
         self._goto(FIState.SEARCHING_OBJECT)
         log.info("[FSM] 目標設定：%s (%s)", zh, en)
+        _send_control_message({
+            "type": "state",
+            "mode": "FIND_ITEM",
+            "zh": zh,
+            "en": en,
+        })
 
     def set_app_mode(self, mode: str):
         self.app_mode = mode or "IDLE"
@@ -382,6 +388,7 @@ class FindItemFSM:
         self.last_obj   = None
         self._t_head = self._t_hand = self._t_search = self._t_success = 0.
         log.info("[FSM] 已重置，等待指令")
+        _send_control_message({"type": "state", "mode": "IDLE"})
 
     def _say(self, text: str):
         if text:
@@ -498,18 +505,41 @@ def draw_overlay(frame: np.ndarray, fsm: FindItemFSM,
 # ════════════════════════════════════════════════════════
 _latest_frame:      Optional[np.ndarray] = None
 _latest_frame_lock  = threading.Lock()
+_latest_frame_at    = 0.0
+_latest_frame_count = 0
 _stop_flag          = threading.Event()
 
 
 def _set_frame(f: np.ndarray):
-    global _latest_frame
+    global _latest_frame, _latest_frame_at, _latest_frame_count
     with _latest_frame_lock:
         _latest_frame = f
+        _latest_frame_at = time.monotonic()
+        _latest_frame_count += 1
 
 
 def _get_frame() -> Optional[np.ndarray]:
     with _latest_frame_lock:
         return None if _latest_frame is None else _latest_frame.copy()
+
+
+def _get_frame_stats():
+    with _latest_frame_lock:
+        return _latest_frame_count, _latest_frame_at
+
+
+def _status_frame(width: int, height: int, lines: List[str]) -> np.ndarray:
+    w = max(320, int(width))
+    h = max(220, int(height))
+    img = np.full((h, w, 3), (48, 48, 48), dtype=np.uint8)
+    y = 52
+    for i, line in enumerate(lines):
+        color = (0, 255, 255) if i == 0 else (230, 230, 230)
+        cv2.putText(img, line, (28, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.72 if i == 0 else 0.55, color, 2 if i == 0 else 1,
+                    cv2.LINE_AA)
+        y += 34
+    return img
 
 
 # ════════════════════════════════════════════════════════
@@ -534,6 +564,7 @@ def _webcam_producer(index: int = 0):
 def _ws_producer(url: str):
     async def _loop():
         import websockets
+        frame_count = 0
         while not _stop_flag.is_set():
             try:
                 log.info("[SRC] 連線至 %s ...", url)
@@ -549,6 +580,9 @@ def _ws_producer(url: str):
                         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                         if frame is not None:
                             _set_frame(frame)
+                            frame_count += 1
+                            if frame_count == 1:
+                                log.info("[SRC] first video frame received from %s", url)
             except Exception as e:
                 log.warning("[SRC] WebSocket 中斷：%s，3 秒後重試...", e)
                 await asyncio.sleep(3)
@@ -575,6 +609,8 @@ def _ws_producer(url: str):
 # (find_item_window 與 app_main 之間的雙向通道)
 _ctrl_ws_ref:  Optional[Any] = None   # websockets.WebSocketClientProtocol
 _ctrl_ws_loop: Optional[asyncio.AbstractEventLoop] = None
+_pending_tts: List[str] = []
+_pending_tts_lock = threading.Lock()
 
 
 def _send_control_message(payload: dict) -> None:
@@ -588,6 +624,25 @@ def _send_control_message(payload: dict) -> None:
             log.warning("[CTRL] send failed: %s", e)
 
     asyncio.run_coroutine_threadsafe(_send(), _ctrl_ws_loop)
+
+
+def _queue_relay_tts(text: str) -> None:
+    with _pending_tts_lock:
+        _pending_tts.append(text)
+        del _pending_tts[:-10]
+
+
+async def _flush_pending_tts(ws) -> None:
+    with _pending_tts_lock:
+        pending = list(_pending_tts)
+        _pending_tts.clear()
+    for text in pending:
+        try:
+            await ws.send(json.dumps({"type": "tts", "text": text}, ensure_ascii=False))
+        except Exception as e:
+            log.warning("[TTS-RELAY] flush failed: %s", e)
+            _queue_relay_tts(text)
+            break
 
 
 def _control_ws_listener(url: str, fsm: "FindItemFSM"):
@@ -619,6 +674,7 @@ def _control_ws_listener(url: str, fsm: "FindItemFSM"):
                     await ws.send(json.dumps(
                         {"type": "hello", "client": "find_item_window"},
                         ensure_ascii=False))
+                    await _flush_pending_tts(ws)
                     async for msg in ws:
                         if _stop_flag.is_set():
                             break
@@ -669,6 +725,10 @@ def _make_relay_tts_fn() -> Callable[[str], None]:
     Cooldown 由 app_main 的 audio_player._voice_cooldown(4s) 統一管理。
     """
     def _relay_tts(text: str):
+        if _ctrl_ws_loop is None or _ctrl_ws_ref is None:
+            _queue_relay_tts(text)
+            print(f"[TTS-RELAY] app_main not connected yet; queued: {text}", flush=True)
+            return
         if _ctrl_ws_loop is None or _ctrl_ws_ref is None:
             print(f"[TTS-RELAY] app_main 未連線，退回 print: {text}", flush=True)
             return
@@ -1008,21 +1068,52 @@ def main():
     frame_toggle = True
     last_dets: List[Detection]      = []
     last_hand: Optional[HandResult] = None
+    last_wait_log = 0.0
 
     try:
         while not _stop_flag.is_set():
             frame = _get_frame()
             if frame is None:
-                time.sleep(0.01)
-                cv2.waitKey(1)
+                now = time.monotonic()
+                if now - last_wait_log > 5.0:
+                    log.info(
+                        "[SRC] waiting for video frames. If using --source ws, "
+                        "app_main must receive ESP32 frames on /ws/camera first."
+                    )
+                    last_wait_log = now
+                if args.source == "ws":
+                    lines = [
+                        "Waiting for video frames...",
+                        f"Connected to: {args.ws_url}",
+                        "app_main is running, but no camera frame has arrived yet.",
+                        "Check ESP32 camera -> /ws/camera, or test with --source webcam.",
+                        "Press q or ESC to quit.",
+                    ]
+                else:
+                    lines = [
+                        "Waiting for webcam frames...",
+                        f"Webcam index: {args.webcam_index}",
+                        "Check camera permission or try another --webcam-index.",
+                        "Press q or ESC to quit.",
+                    ]
+                cv2.imshow(WIN, _status_frame(args.display_width, args.display_height, lines))
+                k = cv2.waitKey(30) & 0xFF
+                if k in (ord('q'), 27):
+                    break
                 continue
 
             # cv2.flip(frame, 1) 已注解（翻轉會加重誤判）
             frame = np.ascontiguousarray(frame)
 
-            run_hands = (fsm.state == FIState.GUIDING_HAND)
+            find_active = (fsm.app_mode == "FIND_ITEM" and bool(fsm.target_en))
+            run_hands = (find_active and fsm.state == FIState.GUIDING_HAND)
 
-            if not run_hands:
+            if not find_active:
+                dets = []
+                hand = None
+                last_dets = []
+                last_hand = None
+            elif not run_hands:
                 dets      = detector.infer(frame.copy())
                 last_dets = dets
                 hand      = None
@@ -1059,6 +1150,8 @@ def main():
             elif k == ord('6'): fsm.set_target("鍵盤", "keyboard")
             elif k == ord('7'): fsm.set_target("滑鼠", "mouse")
 
+    except KeyboardInterrupt:
+        log.info("[SHUTDOWN] interrupted by Ctrl+C")
     finally:
         _stop_flag.set()
         unregister_from_app_main()
